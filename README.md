@@ -34,9 +34,10 @@ Customize the look and feel from the menu bar or **Theme & Appearance Settings**
 - **Solar Gold**: Radiant amber with golden warmth
 - **Monochrome**: Clean minimalist slate & frosted white
 
-### ⚡ Performance & Stability (v1.0.3)
+### ⚡ Performance, Memory & Stability (v1.0.3)
 
-- **Crash-Free Window Architecture**: Fully isolated AppKit window management with zero use-after-free or dangling pointer hazards.
+- **Ultra-Low Memory Footprint (~16 MB)**: Active heap pressure relief and cache pruning (`malloc_zone_pressure_relief`) automatically return decoded bitmap caches and unused heap pages to the macOS kernel whenever the radial wheel dismisses or editors close.
+- **Crash-Free Window Architecture**: Fully isolated AppKit window management with zero use-after-free or dangling pointer hazards (`isReleasedWhenClosed = false`).
 - **Optimized Theme Switching**: Smooth real-time reactive theme transitions across the radial wheel, MenuBarExtra, and modal editors without AppKit menu tracking interference.
 - **Robust Metadata Engine**: Safe CoreGraphics image source validation and thumbnail dimensions checking.
 - **Keyboard Shortcuts**: Press `Escape` in any editor or settings window to dismiss immediately.
