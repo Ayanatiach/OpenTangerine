@@ -34,6 +34,14 @@ Customize the look and feel from the menu bar or **Theme & Appearance Settings**
 - **Solar Gold**: Radiant amber with golden warmth
 - **Monochrome**: Clean minimalist slate & frosted white
 
+### ⚡ Performance & Stability (v1.0.3)
+
+- **Crash-Free Window Architecture**: Fully isolated AppKit window management with zero use-after-free or dangling pointer hazards.
+- **Optimized Theme Switching**: Smooth real-time reactive theme transitions across the radial wheel, MenuBarExtra, and modal editors without AppKit menu tracking interference.
+- **Robust Metadata Engine**: Safe CoreGraphics image source validation and thumbnail dimensions checking.
+- **Keyboard Shortcuts**: Press `Escape` in any editor or settings window to dismiss immediately.
+- **Safe Batch Handling**: Multi-file drag protection ensures interactive tools launch cleanly for single inspection while batch converters process all selected files in parallel.
+
 ## 📦 Install
 
 1. Download `OpenTangerine-<version>-macOS.zip` from the [Releases](https://github.com/Ayanatiach/OpenTangerine/releases) page

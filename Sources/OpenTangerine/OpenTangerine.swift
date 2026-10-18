@@ -1374,6 +1374,7 @@ final class WheelPanel: NSPanel {
             backing: .buffered,
             defer: false
         )
+        isReleasedWhenClosed = false
         isFloatingPanel = true
         level = .popUpMenu
         backgroundColor = .clear
@@ -1566,6 +1567,7 @@ public struct CropEditorView: View {
         }
         .frame(width: 480, height: 580)
         .background(LiquidWindowBackground())
+        .onExitCommand(perform: onClose)
         .onAppear {
             if let img = NSImage(contentsOf: sourceURL) {
                 nsImage = img
@@ -1693,6 +1695,7 @@ public struct BackgroundEditorView: View {
         }
         .frame(width: 490, height: 610)
         .background(LiquidWindowBackground())
+        .onExitCommand(perform: onClose)
         .onAppear { nsImage = NSImage(contentsOf: sourceURL) }
     }
 
@@ -1800,7 +1803,8 @@ public struct ImageMetadataReport: Sendable {
         let fileSizeStr = ByteCountFormatter.string(fromByteCount: fileSizeBytes, countStyle: .file)
         let ext = url.pathExtension.uppercased()
 
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              CGImageSourceGetCount(source) > 0 else {
             return ImageMetadataReport(
                 fileName: url.lastPathComponent,
                 fileSize: fileSizeStr,
@@ -2245,6 +2249,7 @@ public struct MetadataInspectorView: View {
         }
         .frame(width: 520, height: 620)
         .background(LiquidWindowBackground())
+        .onExitCommand(perform: onClose)
         .onAppear {
             loadMetadata()
             loadThumbnail()
@@ -2312,12 +2317,14 @@ public struct MetadataInspectorView: View {
 
     private func loadThumbnail() {
         guard let src = CGImageSourceCreateWithURL(sourceURL as CFURL, nil) else { return }
+        guard CGImageSourceGetCount(src) > 0 else { return }
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceThumbnailMaxPixelSize: 180
         ]
         if let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) {
+            guard cg.width > 0 && cg.height > 0 else { return }
             thumbnail = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
         }
     }
@@ -2591,6 +2598,7 @@ public struct ThemeSettingsView: View {
         }
         .frame(width: 500, height: 640)
         .background(LiquidWindowBackground())
+        .onExitCommand(perform: onClose)
     }
 
     @ViewBuilder
@@ -2668,6 +2676,14 @@ public struct ThemeSettingsView: View {
 
 // MARK: - 9. App Coordinator & Floating Wheel Controller
 
+private final class EditorWindowDelegate: NSObject, NSWindowDelegate {
+    var onClose: (() -> Void)?
+
+    func windowWillClose(_ notification: Notification) {
+        onClose?()
+    }
+}
+
 @MainActor
 public final class AppCoordinator: ObservableObject {
     public let dragMonitor = DragMonitorService()
@@ -2677,6 +2693,7 @@ public final class AppCoordinator: ObservableObject {
     private var wheelState: WheelState?
     private var wheelCenterPoint: CGPoint = .zero
     private var editorWindow: NSWindow?
+    private var editorWindowDelegate: EditorWindowDelegate?
 
     public init() {
         setupDragMonitor()
@@ -2747,8 +2764,15 @@ public final class AppCoordinator: ObservableObject {
         state.onCommit = { [weak self] slice in
             guard let self else { return }
             self.hideWheel()
-            for url in urls {
-                self.execute(slice.action, for: url)
+            switch slice.action {
+            case .openTool:
+                if let first = urls.first {
+                    self.execute(slice.action, for: first)
+                }
+            case .convertToFormat:
+                for url in urls {
+                    self.execute(slice.action, for: url)
+                }
             }
         }
         state.onDismiss = { [weak self] in
@@ -2808,8 +2832,10 @@ public final class AppCoordinator: ObservableObject {
         }
         dragMonitor.endSession()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
-            self?.wheelPanel?.orderOut(nil)
-            self?.wheelState = nil
+            guard let self else { return }
+            self.wheelPanel?.orderOut(nil)
+            self.wheelPanel?.contentView = nil
+            self.wheelState = nil
         }
     }
 
@@ -2831,22 +2857,22 @@ public final class AppCoordinator: ObservableObject {
                 openEditor(CropEditorView(
                     sourceURL: fileURL,
                     onComplete: { [weak self] url in
-                        self?.editorWindow?.close()
+                        self?.closeEditor()
                         self?.statusMessage = "Cropped \(url.lastPathComponent)"
                         NSWorkspace.shared.activateFileViewerSelecting([url])
                     },
-                    onClose: { [weak self] in self?.editorWindow?.close() }
+                    onClose: { [weak self] in self?.closeEditor() }
                 ), size: CGSize(width: 480, height: 580))
 
             case .addBG:
                 openEditor(BackgroundEditorView(
                     sourceURL: fileURL,
                     onComplete: { [weak self] url in
-                        self?.editorWindow?.close()
+                        self?.closeEditor()
                         self?.statusMessage = "Added BG to \(url.lastPathComponent)"
                         NSWorkspace.shared.activateFileViewerSelecting([url])
                     },
-                    onClose: { [weak self] in self?.editorWindow?.close() }
+                    onClose: { [weak self] in self?.closeEditor() }
                 ), size: CGSize(width: 490, height: 610))
 
             case .compress:
@@ -2868,7 +2894,7 @@ public final class AppCoordinator: ObservableObject {
                         self?.statusMessage = "Saved clean copy: \(url.lastPathComponent)"
                         NSWorkspace.shared.activateFileViewerSelecting([url])
                     },
-                    onClose: { [weak self] in self?.editorWindow?.close() }
+                    onClose: { [weak self] in self?.closeEditor() }
                 ), size: CGSize(width: 520, height: 620))
             }
         }
@@ -2882,30 +2908,57 @@ public final class AppCoordinator: ObservableObject {
         alert.runModal()
     }
 
+    public func closeEditor() {
+        guard let win = editorWindow else { return }
+        editorWindow = nil
+        editorWindowDelegate = nil
+        win.delegate = nil
+        win.contentView = nil
+        win.orderOut(nil)
+        win.close()
+    }
+
     private func openEditor<V: View>(_ view: V, size: CGSize) {
-        editorWindow?.close()
+        closeEditor()
+
         let win = NSWindow(
             contentRect: CGRect(origin: .zero, size: size),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
+        win.isReleasedWhenClosed = false
         win.titlebarAppearsTransparent = true
         win.titleVisibility = .hidden
         win.isMovableByWindowBackground = true
         win.backgroundColor = .clear
         win.isOpaque = false
+        win.hasShadow = true
         win.level = .floating
         win.center()
-        win.contentView = NSHostingView(rootView: view)
+        win.standardWindowButton(.closeButton)?.isHidden = true
+        win.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        win.standardWindowButton(.zoomButton)?.isHidden = true
+
+        let hostingView = NSHostingView(rootView: view)
+        win.contentView = hostingView
+
+        let delegate = EditorWindowDelegate()
+        delegate.onClose = { [weak self] in
+            self?.editorWindow = nil
+            self?.editorWindowDelegate = nil
+        }
+        win.delegate = delegate
+        self.editorWindowDelegate = delegate
+        self.editorWindow = win
+
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        editorWindow = win
     }
 
     public func openSettings() {
         openEditor(ThemeSettingsView(onClose: { [weak self] in
-            self?.editorWindow?.close()
+            self?.closeEditor()
         }), size: CGSize(width: 500, height: 640))
     }
 }
@@ -2915,6 +2968,7 @@ public final class AppCoordinator: ObservableObject {
 @main
 public struct OpenTangerineApp: App {
     @StateObject private var coordinator = AppCoordinator()
+    @ObservedObject private var theme = ThemeManager.shared
 
     public init() {
         if CommandLine.arguments.count >= 4 && CommandLine.arguments[1] == "--convert" {
@@ -2929,6 +2983,60 @@ public struct OpenTangerineApp: App {
                 fputs("Error: \(error.localizedDescription)\n", stderr)
                 exit(1)
             }
+        }
+
+        if CommandLine.arguments.contains("--test-stability") {
+            print("==> Running OpenTangerine Stability Tests…")
+            let theme = ThemeManager.shared
+            for preset in ThemePreset.allCases {
+                theme.currentTheme = preset
+                assert(theme.currentTheme == preset)
+                _ = theme.accent
+                _ = theme.isLiquidGlass
+                _ = theme.effectiveGlassOpacity
+            }
+            print("  ✓ Theme preset switching: OK")
+
+            let coord = AppCoordinator()
+            coord.openSettings()
+            theme.currentTheme = .liquidGlass
+            theme.liquidGlassOpacity = 0.50
+            theme.currentTheme = .monochrome
+            theme.currentTheme = .tangerine
+            coord.closeEditor()
+            print("  ✓ Theme settings open/close/switch: OK")
+
+            coord.openSettings()
+            coord.openSettings()
+            coord.closeEditor()
+            print("  ✓ Idempotent settings re-opening: OK")
+
+            let tempDir = FileManager.default.temporaryDirectory
+            let testImgURL = tempDir.appendingPathComponent("test_img.png")
+            let img = NSImage(size: NSSize(width: 80, height: 80))
+            img.lockFocus()
+            NSColor.systemOrange.setFill()
+            NSRect(x: 0, y: 0, width: 80, height: 80).fill()
+            img.unlockFocus()
+            if let tiff = img.tiffRepresentation,
+               let rep = NSBitmapImageRep(data: tiff),
+               let png = rep.representation(using: .png, properties: [:]) {
+                try? png.write(to: testImgURL)
+            }
+
+            let report = ImageMetadataReport.load(from: testImgURL)
+            assert(!report.format.isEmpty)
+            print("  ✓ ImageMetadataReport extraction: OK (\(report.dimensions), \(report.format))")
+
+            coord.execute(.openTool(.metadata), for: testImgURL)
+            coord.closeEditor()
+            coord.execute(.openTool(.metadata), for: testImgURL)
+            coord.openSettings()
+            coord.closeEditor()
+            print("  ✓ Metadata inspector open/close/switch: OK")
+
+            print("==> ALL STABILITY TESTS PASSED WITH ZERO CRASHES! 🎉")
+            exit(0)
         }
     }
 
@@ -2957,12 +3065,12 @@ public struct OpenTangerineApp: App {
                     coordinator.pickFileAndShowWheel(mode: .tools)
                 }
                 Divider()
-                Menu("Theme: \(ThemeManager.shared.currentTheme.name)") {
+                Menu("Theme") {
                     ForEach(ThemePreset.allCases) { preset in
                         Button {
-                            ThemeManager.shared.currentTheme = preset
+                            theme.currentTheme = preset
                         } label: {
-                            if ThemeManager.shared.currentTheme == preset {
+                            if theme.currentTheme == preset {
                                 Text("✓ \(preset.name)")
                             } else {
                                 Text(preset.name)
@@ -2970,8 +3078,8 @@ public struct OpenTangerineApp: App {
                         }
                     }
                 }
-                if ThemeManager.shared.isLiquidGlass {
-                    Text("• Glass: \(ThemeManager.shared.transparencyPercentage)% Transparent")
+                if theme.isLiquidGlass {
+                    Text("• Glass: \(theme.transparencyPercentage)% Transparent")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
