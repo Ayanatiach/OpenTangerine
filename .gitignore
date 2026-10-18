@@ -1,0 +1,13 @@
+# SwiftPM build products
+.build/
+.swiftpm/
+Package.resolved
+
+# Packaged app output (attach the zip to a GitHub Release instead of committing it)
+dist/
+
+# Xcode / macOS cruft
+*.xcodeproj/
+xcuserdata/
+DerivedData/
+.DS_Store
