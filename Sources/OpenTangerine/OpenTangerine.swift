@@ -18,6 +18,7 @@ import ImageIO
 import CoreImage
 import AVFoundation
 import Combine
+import Darwin
 
 // MARK: - 1. Models & Radial Menu Configuration
 
@@ -2836,6 +2837,7 @@ public final class AppCoordinator: ObservableObject {
             self.wheelPanel?.orderOut(nil)
             self.wheelPanel?.contentView = nil
             self.wheelState = nil
+            malloc_zone_pressure_relief(nil, 0)
         }
     }
 
@@ -2916,6 +2918,7 @@ public final class AppCoordinator: ObservableObject {
         win.contentView = nil
         win.orderOut(nil)
         win.close()
+        malloc_zone_pressure_relief(nil, 0)
     }
 
     private func openEditor<V: View>(_ view: V, size: CGSize) {
