@@ -4,7 +4,10 @@
 //  Inspired by Tangerine: File Converter for macOS
 //
 //  Compile & Run on macOS 13.0+:
-//    swiftc OpenTangerine.swift -o OpenTangerine && ./OpenTangerine
+//    swiftc -parse-as-library OpenTangerine.swift -o OpenTangerine && ./OpenTangerine
+//  or, from the package root:
+//    swift run -c release            (menu bar app)
+//    swift run -c release OpenTangerine --convert png photo.heic   (command-line conversion)
 //
 
 import SwiftUI
@@ -23,6 +26,11 @@ public enum WheelMode: String, CaseIterable {
     case tools = "Tools (⌥⇧ + Drag)"
 }
 
+/// How the wheel was opened: from a Finder drag (release over a slice) or from the menu bar (click a slice).
+public enum WheelInteraction {
+    case drag, click
+}
+
 public enum FileCategory: String {
     case pdf, image, video, audio, document, unknown
 
@@ -30,16 +38,27 @@ public enum FileCategory: String {
         switch url.pathExtension.lowercased() {
         case "pdf":
             return .pdf
-        case "jpg", "jpeg", "png", "webp", "heic", "tiff", "tif", "bmp", "gif", "avif":
+        case "jpg", "jpeg", "png", "webp", "heic", "heif", "tiff", "tif", "bmp", "gif", "avif":
             return .image
         case "mp4", "mov", "mkv", "avi", "webm", "m4v":
             return .video
         case "mp3", "m4a", "wav", "flac", "aac", "ogg", "aiff":
             return .audio
-        case "txt", "rtf", "docx", "md", "html":
+        case "txt", "rtf", "docx", "md", "html", "htm":
             return .document
         default:
             return .unknown
+        }
+    }
+
+    /// Canonical spelling so "jpeg"/"jpg", "tif"/"tiff", "heif"/"heic" compare equal.
+    public static func normalizedExtension(_ ext: String) -> String {
+        switch ext.lowercased() {
+        case "jpeg": return "jpg"
+        case "tif": return "tiff"
+        case "heif": return "heic"
+        case "htm": return "html"
+        default: return ext.lowercased()
         }
     }
 }
@@ -53,10 +72,7 @@ public enum ToolKind: String, CaseIterable, Identifiable {
     case crop = "CROP"
     case compress = "COMPRESS"
     case metadata = "METADATA"
-    case adjust = "ADJUST"
-    case annotate = "ANNOTATE"
     case addBG = "ADD BG"
-    case redact = "REDACT"
 
     public var id: String { rawValue }
 
@@ -65,175 +81,203 @@ public enum ToolKind: String, CaseIterable, Identifiable {
         case .crop: return "crop"
         case .compress: return "arrow.down.right.and.arrow.up.left"
         case .metadata: return "info.circle"
-        case .adjust: return "slider.horizontal.3"
-        case .annotate: return "pencil.tip.crop.circle"
         case .addBG: return "photo.artframe"
-        case .redact: return "eye.slash"
+        }
+    }
+
+    public var hint: String {
+        switch self {
+        case .crop: return "Crop & resize"
+        case .compress: return "Shrink file size"
+        case .metadata: return "Strip EXIF & GPS"
+        case .addBG: return "Add a backdrop"
         }
     }
 }
 
 public struct RadialSlice: Identifiable, Equatable {
-    public let id = UUID()
+    public var id: String { title }
     public let title: String
     public let systemIcon: String?
+    public let hint: String
     public let action: RadialActionType
 
-    public init(title: String, systemIcon: String? = nil, action: RadialActionType) {
+    public init(title: String, systemIcon: String? = nil, hint: String = "", action: RadialActionType) {
         self.title = title
         self.systemIcon = systemIcon
+        self.hint = hint
         self.action = action
+    }
+
+    public var isTool: Bool {
+        if case .openTool = action { return true }
+        return false
     }
 }
 
 public struct RadialMenuConfiguration {
     public let outerSlices: [RadialSlice]
-    public let centerSlice: RadialSlice?
     public let centerSubtitle: String
+    public let emptyMessage: String?
 
     public static func build(for url: URL, mode: WheelMode) -> RadialMenuConfiguration {
         let category = FileCategory.detect(from: url)
         let fileSizeString = Self.formattedFileSize(for: url)
+        let currentExt = FileCategory.normalizedExtension(url.pathExtension)
 
         switch mode {
         case .convert:
+            let targets: [String]
             switch category {
             case .pdf:
-                // Matches 00:02 in video: DOCX (top), JPG (right), PNG (bottom), TXT (left) + file size in center
-                return RadialMenuConfiguration(
-                    outerSlices: [
-                        RadialSlice(title: "DOCX", action: .convertToFormat("docx")),
-                        RadialSlice(title: "JPG", action: .convertToFormat("jpg")),
-                        RadialSlice(title: "PNG", action: .convertToFormat("png")),
-                        RadialSlice(title: "TXT", action: .convertToFormat("txt"))
-                    ],
-                    centerSlice: nil,
-                    centerSubtitle: fileSizeString
-                )
+                targets = ["DOCX", "JPG", "PNG", "TXT"]
             case .image:
-                // Matches 00:05 & 00:12 in video: 8 outer format slices + TIFF in center
-                let currentExt = url.pathExtension.lowercased()
-                let normalizedExt = (currentExt == "jpeg") ? "jpg" : currentExt
-                let formats = ["PNG", "WEBP", "HEIC", "JPG", "AVIF", "BMP", "PDF", "DOCX"]
-                    .filter { $0.lowercased() != normalizedExt }
-                return RadialMenuConfiguration(
-                    outerSlices: Array(formats.prefix(8)).map {
-                        RadialSlice(title: $0, action: .convertToFormat($0.lowercased()))
-                    },
-                    centerSlice: RadialSlice(title: "TIFF", action: .convertToFormat("tiff")),
-                    centerSubtitle: fileSizeString
-                )
+                targets = ["PNG", "JPG", "HEIC", "PDF", "TIFF", "AVIF", "BMP", "DOCX"]
+            case .document:
+                targets = ["TXT", "RTF", "DOCX", "HTML"]
             default:
-                return RadialMenuConfiguration(
-                    outerSlices: ["PDF", "TXT", "DOCX", "PNG", "JPG"].map {
-                        RadialSlice(title: $0, action: .convertToFormat($0.lowercased()))
-                    },
-                    centerSlice: nil,
-                    centerSubtitle: fileSizeString
-                )
+                targets = []
             }
+            let slices = targets
+                .filter { FileCategory.normalizedExtension($0) != currentExt }
+                .filter { FileConversionEngine.shared.canConvert(category, to: $0.lowercased()) }
+                .map { RadialSlice(title: $0, systemIcon: Self.icon(forFormat: $0), action: .convertToFormat($0.lowercased())) }
+            return RadialMenuConfiguration(
+                outerSlices: slices,
+                centerSubtitle: fileSizeString,
+                emptyMessage: slices.isEmpty ? "No conversions for .\(url.pathExtension.lowercased())" : nil
+            )
 
         case .tools:
-            // Matches 00:05.4 & 00:13 in video: 6 outer tool slices + CROP in center
-            let outerTools: [ToolKind] = [.compress, .metadata, .adjust, .annotate, .addBG, .redact]
+            guard category == .image else {
+                return RadialMenuConfiguration(outerSlices: [], centerSubtitle: fileSizeString, emptyMessage: "Tools work on images")
+            }
             return RadialMenuConfiguration(
-                outerSlices: outerTools.map {
-                    RadialSlice(title: $0.rawValue, systemIcon: $0.systemIcon, action: .openTool($0))
+                outerSlices: ToolKind.allCases.map {
+                    RadialSlice(title: $0.rawValue, systemIcon: $0.systemIcon, hint: $0.hint, action: .openTool($0))
                 },
-                centerSlice: RadialSlice(title: "CROP", systemIcon: "crop", action: .openTool(.crop)),
-                centerSubtitle: fileSizeString
+                centerSubtitle: fileSizeString,
+                emptyMessage: nil
             )
+        }
+    }
+
+    static func icon(forFormat format: String) -> String {
+        switch format {
+        case "PDF": return "doc.richtext"
+        case "DOCX": return "doc.text"
+        case "TXT": return "text.alignleft"
+        case "RTF": return "textformat"
+        case "HTML": return "chevron.left.forwardslash.chevron.right"
+        default: return "photo"
         }
     }
 
     public static func formattedFileSize(for url: URL) -> String {
         guard let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
               let size = values.fileSize else { return "File" }
+        return formattedByteCount(Int64(size))
+    }
+
+    public static func formattedByteCount(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useKB, .useMB, .useGB]
         formatter.countStyle = .file
-        return formatter.string(fromByteCount: Int64(size))
+        return formatter.string(fromByteCount: bytes)
     }
 }
 
 // MARK: - 2. Global Finder Drag & Modifier Monitor
 
 @MainActor
-public final class DragMonitorService: ObservableObject {
-    @Published public var isWheelVisible: Bool = false
-    @Published public var wheelCenterScreenPoint: CGPoint = .zero
-    @Published public var activeFileURLs: [URL] = []
-    @Published public var activeMode: WheelMode = .convert
-    @Published public var hoveredSlice: RadialSlice? = nil
-    @Published public var statusMessage: String = "Ready — Hold Shift (⇧) while dragging any file in Finder"
+public final class DragMonitorService {
+    public private(set) var activeFileURLs: [URL] = []
+
+    public var onWheelRequested: ((_ urls: [URL], _ mode: WheelMode, _ screenLocation: CGPoint) -> Void)?
+    public var onModeChanged: ((WheelMode) -> Void)?
+    public var onPointerMoved: ((CGPoint) -> Void)?
+    public var onMouseReleased: (() -> Void)?
+    public var onMouseDown: (() -> Void)?
 
     private var monitors: [Any] = []
-    private var isDraggingFile: Bool = false
-    public var onStateChanged: (() -> Void)?
-    public var onActionTriggered: ((URL, RadialActionType) -> Void)?
+    private var isDraggingFile = false
+    private var isWheelOpen = false
+    private var currentMode: WheelMode?
+    private var dragPasteboardCountAtMouseDown = -1
+
+    public init() {}
 
     public func startMonitoring() {
-        if let m1 = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDragged], handler: { [weak self] e in
-            Task { @MainActor in self?.handleDrag(e) }
-        }) { monitors.append(m1) }
-
-        if let m2 = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged], handler: { [weak self] e in
-            Task { @MainActor in self?.handleFlags(e) }
-        }) { monitors.append(m2) }
-
-        if let m3 = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp], handler: { [weak self] e in
-            Task { @MainActor in self?.handleMouseUp(e) }
-        }) { monitors.append(m3) }
+        guard monitors.isEmpty else { return }
+        addMonitor(.leftMouseDown) { service, _ in service.handleMouseDown() }
+        addMonitor(.leftMouseDragged) { service, flags in service.handleDrag(flags) }
+        addMonitor(.flagsChanged) { service, flags in service.handleFlags(flags) }
+        addMonitor(.leftMouseUp) { service, _ in service.handleMouseUp() }
     }
 
-    private func handleDrag(_ event: NSEvent) {
-        let pasteboard = NSPasteboard(name: .drag)
+    public func endSession() {
+        isWheelOpen = false
+        currentMode = nil
+        isDraggingFile = false
+    }
+
+    private func addMonitor(_ mask: NSEvent.EventTypeMask,
+                            _ handler: @escaping @MainActor (DragMonitorService, NSEvent.ModifierFlags) -> Void) {
+        let monitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
+            let flags = event.modifierFlags
+            Task { @MainActor in
+                guard let self else { return }
+                handler(self, flags)
+            }
+        }
+        if let monitor { monitors.append(monitor) }
+    }
+
+    private func handleMouseDown() {
+        dragPasteboardCountAtMouseDown = NSPasteboard(name: .drag).changeCount
+        isDraggingFile = false
+        onMouseDown?()
+    }
+
+    private func handleDrag(_ flags: NSEvent.ModifierFlags) {
         if !isDraggingFile {
-            if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
-               !urls.isEmpty {
-                isDraggingFile = true
-                activeFileURLs = urls
-            }
+            let pasteboard = NSPasteboard(name: .drag)
+            guard pasteboard.changeCount != dragPasteboardCountAtMouseDown,
+                  let urls = pasteboard.readObjects(forClasses: [NSURL.self],
+                                                    options: [.urlReadingFileURLsOnly: true]) as? [URL],
+                  !urls.isEmpty else { return }
+            isDraggingFile = true
+            activeFileURLs = urls
         }
-        guard isDraggingFile, !activeFileURLs.isEmpty else { return }
-        evaluateModifiers(event.modifierFlags, at: NSEvent.mouseLocation)
+        evaluate(flags)
     }
 
-    private func handleFlags(_ event: NSEvent) {
-        guard isDraggingFile, !activeFileURLs.isEmpty else { return }
-        evaluateModifiers(event.modifierFlags, at: NSEvent.mouseLocation)
+    private func handleFlags(_ flags: NSEvent.ModifierFlags) {
+        guard isDraggingFile else { return }
+        evaluate(flags)
     }
 
-    private func evaluateModifiers(_ flags: NSEvent.ModifierFlags, at mouseLoc: CGPoint) {
-        let hasShift = flags.contains(.shift)
-        let hasOption = flags.contains(.option)
+    private func evaluate(_ flags: NSEvent.ModifierFlags) {
+        let location = NSEvent.mouseLocation
+        let requested: WheelMode? = flags.contains(.shift) ? (flags.contains(.option) ? .tools : .convert) : nil
 
-        if hasShift && hasOption {
-            activeMode = .tools
-            if !isWheelVisible {
-                wheelCenterScreenPoint = mouseLoc
-                isWheelVisible = true
+        if !isWheelOpen {
+            guard let mode = requested else { return }
+            isWheelOpen = true
+            currentMode = mode
+            onWheelRequested?(activeFileURLs, mode, location)
+        } else {
+            if let mode = requested, mode != currentMode {
+                currentMode = mode
+                onModeChanged?(mode)
             }
-            onStateChanged?()
-        } else if hasShift {
-            activeMode = .convert
-            if !isWheelVisible {
-                wheelCenterScreenPoint = mouseLoc
-                isWheelVisible = true
-            }
-            onStateChanged?()
+            onPointerMoved?(location)
         }
     }
 
-    private func handleMouseUp(_ event: NSEvent) {
-        defer {
-            isDraggingFile = false
-            isWheelVisible = false
-            hoveredSlice = nil
-            onStateChanged?()
-        }
-        guard isWheelVisible, let slice = hoveredSlice, let firstURL = activeFileURLs.first else { return }
-        onActionTriggered?(firstURL, slice.action)
+    private func handleMouseUp() {
+        isDraggingFile = false
+        if isWheelOpen { onMouseReleased?() }
     }
 }
 
@@ -243,80 +287,140 @@ public enum ConversionError: LocalizedError {
     case unreadableSource(String)
     case unsupportedConversion(String)
     case exportFailed(String)
+    case alreadyOptimized(String)
 
     public var errorDescription: String? {
         switch self {
         case .unreadableSource(let msg): return "Could not read source file: \(msg)"
         case .unsupportedConversion(let msg): return "Unsupported conversion: \(msg)"
         case .exportFailed(let msg): return "Export failed: \(msg)"
+        case .alreadyOptimized(let msg): return msg
         }
     }
 }
 
-public final class FileConversionEngine {
+public struct CompressionResult: Sendable {
+    public let output: URL
+    public let originalBytes: Int64
+    public let newBytes: Int64
+}
+
+extension CGImage {
+    var hasAlpha: Bool {
+        switch alphaInfo {
+        case .none, .noneSkipFirst, .noneSkipLast: return false
+        default: return true
+        }
+    }
+}
+
+public final class FileConversionEngine: @unchecked Sendable {
     public static let shared = FileConversionEngine()
+
+    public static let writableTypeIdentifiers: Set<String> =
+        Set((CGImageDestinationCopyTypeIdentifiers() as? [String]) ?? [])
+
+    public static func imageType(forExtension ext: String) -> UTType? {
+        switch FileCategory.normalizedExtension(ext) {
+        case "jpg": return .jpeg
+        case "png": return .png
+        case "tiff": return .tiff
+        case "heic": return .heic
+        case "bmp": return .bmp
+        case "gif": return .gif
+        case "webp": return .webP
+        case "avif": return UTType("public.avif")
+        default: return nil
+        }
+    }
+
+    public static func canEncode(_ ext: String) -> Bool {
+        guard let type = imageType(forExtension: ext) else { return false }
+        return writableTypeIdentifiers.contains(type.identifier)
+    }
+
+    private static func supportsAlpha(_ ext: String) -> Bool {
+        !["jpg", "bmp"].contains(FileCategory.normalizedExtension(ext))
+    }
+
+    public func canConvert(_ category: FileCategory, to targetExt: String) -> Bool {
+        let ext = FileCategory.normalizedExtension(targetExt)
+        switch (category, ext) {
+        case (.pdf, "txt"), (.pdf, "docx"):
+            return true
+        case (.pdf, _):
+            return Self.canEncode(ext)
+        case (.image, "pdf"), (.image, "docx"):
+            return true
+        case (.image, _):
+            return Self.canEncode(ext)
+        case (.document, "txt"), (.document, "rtf"), (.document, "docx"), (.document, "html"):
+            return true
+        default:
+            return false
+        }
+    }
 
     @discardableResult
     public func convertFile(at sourceURL: URL, to targetExt: String) throws -> URL {
-        let ext = targetExt.lowercased()
+        let ext = FileCategory.normalizedExtension(targetExt)
+        let category = FileCategory.detect(from: sourceURL)
+        guard canConvert(category, to: ext) else {
+            throw ConversionError.unsupportedConversion(
+                "\(sourceURL.pathExtension.uppercased()) → \(ext.uppercased()) isn't available on this Mac")
+        }
         let baseName = sourceURL.deletingPathExtension().lastPathComponent
         let parentDir = sourceURL.deletingLastPathComponent()
         let destinationURL = uniqueOutputURL(in: parentDir, baseName: baseName, ext: ext)
-        let category = FileCategory.detect(from: sourceURL)
 
-        switch (category, ext) {
-        case (.pdf, "jpg"), (.pdf, "jpeg"), (.pdf, "png"), (.pdf, "tiff"), (.pdf, "bmp"), (.pdf, "heic"), (.pdf, "webp"):
-            try renderPDFFirstPageToImage(pdfURL: sourceURL, destinationURL: destinationURL, format: ext)
-        case (.pdf, "txt"):
-            try extractTextFromPDF(pdfURL: sourceURL, destinationURL: destinationURL)
-        case (.pdf, "docx"):
-            try convertPDFToDocx(pdfURL: sourceURL, destinationURL: destinationURL)
-        case (.image, "pdf"):
-            try convertImageToPDF(imageURL: sourceURL, destinationURL: destinationURL)
-        case (.image, "docx"):
-            try convertImageToDocx(imageURL: sourceURL, destinationURL: destinationURL)
-        case (.image, _):
-            try convertImageFormat(sourceURL: sourceURL, destinationURL: destinationURL, format: ext)
-        default:
-            throw ConversionError.unsupportedConversion("\(sourceURL.pathExtension) -> \(ext)")
+        do {
+            switch (category, ext) {
+            case (.pdf, "txt"):
+                try extractTextFromPDF(pdfURL: sourceURL, destinationURL: destinationURL)
+            case (.pdf, "docx"):
+                try convertPDFToDocx(pdfURL: sourceURL, destinationURL: destinationURL)
+            case (.pdf, _):
+                try renderPDFFirstPageToImage(pdfURL: sourceURL, destinationURL: destinationURL, format: ext)
+            case (.image, "pdf"):
+                try convertImageToPDF(imageURL: sourceURL, destinationURL: destinationURL)
+            case (.image, "docx"):
+                try convertImageToDocx(imageURL: sourceURL, destinationURL: destinationURL)
+            case (.image, _):
+                try convertImageFormat(sourceURL: sourceURL, destinationURL: destinationURL, format: ext)
+            case (.document, _):
+                try convertDocument(sourceURL: sourceURL, destinationURL: destinationURL, format: ext)
+            default:
+                throw ConversionError.unsupportedConversion("\(sourceURL.pathExtension) -> \(ext)")
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: destinationURL)
+            throw error
         }
         return destinationURL
     }
+
+    // MARK: PDF
 
     private func renderPDFFirstPageToImage(pdfURL: URL, destinationURL: URL, format: String) throws {
         guard let pdfDoc = PDFDocument(url: pdfURL), let page = pdfDoc.page(at: 0) else {
             throw ConversionError.unreadableSource(pdfURL.lastPathComponent)
         }
         let pageRect = page.bounds(for: .mediaBox)
-        let scale: CGFloat = 300.0 / 72.0 // 300 DPI (2550 x 3300 px for US Letter)
-        let targetSize = CGSize(width: round(pageRect.width * scale), height: round(pageRect.height * scale))
+        let scale: CGFloat = 300.0 / 72.0
+        let width = Int(round(pageRect.width * scale))
+        let height = Int(round(pageRect.height * scale))
 
-        guard let bitmapRep = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: Int(targetSize.width),
-            pixelsHigh: Int(targetSize.height),
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: 0,
-            bitsPerPixel: 0
-        ) else {
+        guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
             throw ConversionError.exportFailed("Failed to allocate bitmap buffer.")
         }
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        ctx.scaleBy(x: scale, y: scale)
+        page.draw(with: .mediaBox, to: ctx)
 
-        NSGraphicsContext.saveGraphicsState()
-        if let ctx = NSGraphicsContext(bitmapImageRep: bitmapRep) {
-            NSGraphicsContext.current = ctx
-            ctx.cgContext.setFillColor(NSColor.white.cgColor)
-            ctx.cgContext.fill(CGRect(origin: .zero, size: targetSize))
-            ctx.cgContext.scaleBy(x: scale, y: scale)
-            page.draw(with: .mediaBox, to: ctx.cgContext)
-        }
-        NSGraphicsContext.restoreGraphicsState()
-
-        guard let cgImage = bitmapRep.cgImage else {
+        guard let cgImage = ctx.makeImage() else {
             throw ConversionError.exportFailed("Failed to extract CGImage.")
         }
         try writeCGImage(cgImage, to: destinationURL, format: format, quality: 0.92)
@@ -348,59 +452,179 @@ public final class FileConversionEngine {
         try data.write(to: destinationURL, options: .atomic)
     }
 
-    private func convertImageFormat(sourceURL: URL, destinationURL: URL, format: String) throws {
-        guard let src = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
-              let cgImg = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
-            throw ConversionError.unreadableSource(sourceURL.lastPathComponent)
+    // MARK: Images
+
+    private func loadOrientedImage(_ url: URL) throws -> (CGImage, CGImageSource) {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(source) > 0 else {
+            throw ConversionError.unreadableSource(url.lastPathComponent)
         }
-        try writeCGImage(cgImg, to: destinationURL, format: format, quality: 0.92)
+        let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] ?? [:]
+        let width = props[kCGImagePropertyPixelWidth] as? Int ?? 0
+        let height = props[kCGImagePropertyPixelHeight] as? Int ?? 0
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(width, height, 1),
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+                ?? CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw ConversionError.unreadableSource(url.lastPathComponent)
+        }
+        return (image, source)
+    }
+
+    private func preservedMetadata(_ source: CGImageSource) -> [CFString: Any] {
+        guard let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return [:] }
+        var kept: [CFString: Any] = [:]
+        for key in [kCGImagePropertyExifDictionary, kCGImagePropertyGPSDictionary, kCGImagePropertyIPTCDictionary,
+                    kCGImagePropertyExifAuxDictionary, kCGImagePropertyDPIWidth, kCGImagePropertyDPIHeight] {
+            if let value = props[key] { kept[key] = value }
+        }
+        if var tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+            tiff[kCGImagePropertyTIFFOrientation] = 1
+            kept[kCGImagePropertyTIFFDictionary] = tiff
+        }
+        kept[kCGImagePropertyOrientation] = 1
+        return kept
+    }
+
+    private func convertImageFormat(sourceURL: URL, destinationURL: URL, format: String) throws {
+        let (image, source) = try loadOrientedImage(sourceURL)
+        try writeCGImage(image, to: destinationURL, format: format, quality: 0.9, properties: preservedMetadata(source))
     }
 
     private func convertImageToPDF(imageURL: URL, destinationURL: URL) throws {
-        guard let nsImage = NSImage(contentsOf: imageURL), let page = PDFPage(image: nsImage) else {
-            throw ConversionError.unreadableSource(imageURL.lastPathComponent)
+        let (image, _) = try loadOrientedImage(imageURL)
+        let nsImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+        guard let page = PDFPage(image: nsImage) else {
+            throw ConversionError.exportFailed("Could not create a PDF page from \(imageURL.lastPathComponent)")
         }
         let doc = PDFDocument()
         doc.insert(page, at: 0)
-        doc.write(to: destinationURL)
+        guard doc.write(to: destinationURL) else {
+            throw ConversionError.exportFailed("Could not write \(destinationURL.lastPathComponent)")
+        }
     }
 
     private func convertImageToDocx(imageURL: URL, destinationURL: URL) throws {
-        guard let nsImage = NSImage(contentsOf: imageURL) else {
-            throw ConversionError.unreadableSource(imageURL.lastPathComponent)
-        }
-        let attachment = NSTextAttachment()
-        attachment.image = nsImage
-        let attr = NSAttributedString(attachment: attachment)
-        let data = try attr.data(
-            from: NSRange(location: 0, length: attr.length),
-            documentAttributes: [.documentType: NSAttributedString.DocumentType.officeOpenXML]
-        )
-        try data.write(to: destinationURL)
+        let (image, _) = try loadOrientedImage(imageURL)
+        let useJPEG = !image.hasAlpha
+        let mediaData = try encodedData(image, type: useJPEG ? .jpeg : .png, quality: 0.9)
+        let mediaName = useJPEG ? "image1.jpeg" : "image1.png"
+
+        let maxWidth = 6.5 * 914_400.0, maxHeight = 9.0 * 914_400.0
+        var width = Double(image.width) * 9525, height = Double(image.height) * 9525
+        let fit = min(1, maxWidth / width, maxHeight / height)
+        width = (width * fit).rounded()
+        height = (height * fit).rounded()
+
+        let package = DocxPackage.imageDocument(mediaName: mediaName, mediaData: mediaData,
+                                                widthEMU: Int(width), heightEMU: Int(height),
+                                                title: imageURL.deletingPathExtension().lastPathComponent)
+        try StoredZipArchive.data(for: package).write(to: destinationURL, options: .atomic)
     }
 
-    public func writeCGImage(_ cgImage: CGImage, to destinationURL: URL, format: String, quality: Double = 0.92) throws {
-        let utType: CFString
-        switch format.lowercased() {
-        case "jpg", "jpeg": utType = UTType.jpeg.identifier as CFString
-        case "png": utType = UTType.png.identifier as CFString
-        case "tiff", "tif": utType = UTType.tiff.identifier as CFString
-        case "heic": utType = UTType.heic.identifier as CFString
-        case "bmp": utType = UTType.bmp.identifier as CFString
-        case "webp": utType = UTType.webP.identifier as CFString
-        default: utType = UTType.png.identifier as CFString
+    private func encodedData(_ image: CGImage, type: UTType, quality: Double) throws -> Data {
+        let data = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(data as CFMutableData, type.identifier as CFString, 1, nil) else {
+            throw ConversionError.exportFailed("No encoder for \(type.identifier)")
         }
+        CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else {
+            throw ConversionError.exportFailed("Encoding \(type.identifier) failed")
+        }
+        return data as Data
+    }
 
-        if let dest = CGImageDestinationCreateWithURL(destinationURL as CFURL, utType, 1, nil) {
-            CGImageDestinationAddImage(dest, cgImage, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
-            if CGImageDestinationFinalize(dest) { return }
+    private func flattened(_ image: CGImage) -> CGImage? {
+        let space = (image.colorSpace?.model == .rgb ? image.colorSpace : nil) ?? CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let ctx = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: space,
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(rect)
+        ctx.draw(image, in: rect)
+        return ctx.makeImage()
+    }
+
+    public func writeCGImage(_ cgImage: CGImage, to destinationURL: URL, format: String, quality: Double = 0.92,
+                             properties: [CFString: Any] = [:]) throws {
+        guard let type = Self.imageType(forExtension: format),
+              Self.writableTypeIdentifiers.contains(type.identifier) else {
+            throw ConversionError.unsupportedConversion("This Mac has no \(format.uppercased()) encoder")
         }
-        let rep = NSBitmapImageRep(cgImage: cgImage)
-        let fileType: NSBitmapImageRep.FileType = (format == "jpg" || format == "jpeg") ? .jpeg : .png
-        guard let data = rep.representation(using: fileType, properties: [.compressionFactor: quality]) else {
-            throw ConversionError.exportFailed("Encoding failed for \(format)")
+        let image = (!Self.supportsAlpha(format) && cgImage.hasAlpha) ? (flattened(cgImage) ?? cgImage) : cgImage
+
+        guard let dest = CGImageDestinationCreateWithURL(destinationURL as CFURL, type.identifier as CFString, 1, nil) else {
+            throw ConversionError.exportFailed("Could not create \(destinationURL.lastPathComponent)")
         }
-        try data.write(to: destinationURL)
+        var options = properties
+        options[kCGImageDestinationLossyCompressionQuality] = quality
+        CGImageDestinationAddImage(dest, image, options as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else {
+            try? FileManager.default.removeItem(at: destinationURL)
+            throw ConversionError.exportFailed("Encoding \(format.uppercased()) failed")
+        }
+    }
+
+    // MARK: Image tools
+
+    public func compressImage(at url: URL) throws -> CompressionResult {
+        let (image, source) = try loadOrientedImage(url)
+        let current = FileCategory.normalizedExtension(url.pathExtension)
+        let keepFormat = ["jpg", "heic", "avif"].contains(current) && Self.canEncode(current)
+        let outExt = keepFormat ? current : (image.hasAlpha && Self.canEncode("heic") ? "heic" : "jpg")
+        let output = uniqueOutputURL(in: url.deletingLastPathComponent(),
+                                     baseName: url.deletingPathExtension().lastPathComponent,
+                                     suffix: "Compressed", ext: outExt)
+        try writeCGImage(image, to: output, format: outExt, quality: keepFormat ? 0.6 : 0.75,
+                         properties: preservedMetadata(source))
+        let before = fileSize(url), after = fileSize(output)
+        if after >= before {
+            try? FileManager.default.removeItem(at: output)
+            throw ConversionError.alreadyOptimized("\(url.lastPathComponent) is already well compressed")
+        }
+        return CompressionResult(output: output, originalBytes: before, newBytes: after)
+    }
+
+    public func stripMetadata(at url: URL) throws -> URL {
+        let (image, _) = try loadOrientedImage(url)
+        var ext = FileCategory.normalizedExtension(url.pathExtension)
+        if !Self.canEncode(ext) { ext = "png" }
+        let output = uniqueOutputURL(in: url.deletingLastPathComponent(),
+                                     baseName: url.deletingPathExtension().lastPathComponent,
+                                     suffix: "No Metadata", ext: ext)
+        try writeCGImage(image, to: output, format: ext, quality: 0.95)
+        return output
+    }
+
+    // MARK: Documents
+
+    private func convertDocument(sourceURL: URL, destinationURL: URL, format: String) throws {
+        let attr = try NSAttributedString(url: sourceURL, options: [:], documentAttributes: nil)
+        let range = NSRange(location: 0, length: attr.length)
+        let data: Data
+        switch format {
+        case "txt":
+            data = Data(attr.string.utf8)
+        case "rtf":
+            data = try attr.data(from: range, documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
+        case "docx":
+            data = try attr.data(from: range, documentAttributes: [.documentType: NSAttributedString.DocumentType.officeOpenXML])
+        case "html":
+            data = try attr.data(from: range, documentAttributes: [.documentType: NSAttributedString.DocumentType.html])
+        default:
+            throw ConversionError.unsupportedConversion("\(sourceURL.pathExtension) -> \(format)")
+        }
+        try data.write(to: destinationURL, options: .atomic)
+    }
+
+    // MARK: Helpers
+
+    private func fileSize(_ url: URL) -> Int64 {
+        Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
     }
 
     public func uniqueOutputURL(in directory: URL, baseName: String, suffix: String = "", ext: String) -> URL {
@@ -415,13 +639,153 @@ public final class FileConversionEngine {
     }
 }
 
-// MARK: - 4. Radial Pie Menu View
+// MARK: - Docx & Zip Helpers
+
+enum DocxPackage {
+    static func imageDocument(mediaName: String, mediaData: Data, widthEMU: Int, heightEMU: Int,
+                              title: String) -> [(path: String, data: Data)] {
+        let safeTitle = title
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+        let header = #"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#
+
+        let contentTypes = header + """
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\
+        <Default Extension="xml" ContentType="application/xml"/>\
+        <Default Extension="png" ContentType="image/png"/>\
+        <Default Extension="jpeg" ContentType="image/jpeg"/>\
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>\
+        </Types>
+        """
+        let rootRels = header + """
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>\
+        </Relationships>
+        """
+        let documentRels = header + """
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\
+        <Relationship Id="rIdImage1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/\(mediaName)"/>\
+        </Relationships>
+        """
+        let document = header + """
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" \
+        xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" \
+        xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" \
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" \
+        xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">\
+        <w:body><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing>\
+        <wp:inline distT="0" distB="0" distL="0" distR="0">\
+        <wp:extent cx="\(widthEMU)" cy="\(heightEMU)"/>\
+        <wp:docPr id="1" name="\(safeTitle)"/>\
+        <wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>\
+        <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">\
+        <pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="\(mediaName)"/><pic:cNvPicPr/></pic:nvPicPr>\
+        <pic:blipFill><a:blip r:embed="rIdImage1"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>\
+        <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="\(widthEMU)" cy="\(heightEMU)"/></a:xfrm>\
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>\
+        </a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>\
+        <w:sectPr><w:pgSz w:w="12240" w:h="15840"/>\
+        <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>\
+        </w:sectPr></w:body></w:document>
+        """
+        return [
+            ("[Content_Types].xml", Data(contentTypes.utf8)),
+            ("_rels/.rels", Data(rootRels.utf8)),
+            ("word/_rels/document.xml.rels", Data(documentRels.utf8)),
+            ("word/document.xml", Data(document.utf8)),
+            ("word/media/\(mediaName)", mediaData)
+        ]
+    }
+}
+
+enum StoredZipArchive {
+    static func data(for entries: [(path: String, data: Data)]) -> Data {
+        var archive = Data()
+        var centralDirectory = Data()
+        let dosTime: UInt16 = 0, dosDate: UInt16 = 0x21
+
+        for entry in entries {
+            let name = Data(entry.path.utf8)
+            let crc = crc32(entry.data)
+            let size = UInt32(entry.data.count)
+            let offset = UInt32(archive.count)
+
+            archive.append(le32(0x0403_4B50))
+            archive.append(le16(20)); archive.append(le16(0)); archive.append(le16(0))
+            archive.append(le16(dosTime)); archive.append(le16(dosDate))
+            archive.append(le32(crc)); archive.append(le32(size)); archive.append(le32(size))
+            archive.append(le16(UInt16(name.count))); archive.append(le16(0))
+            archive.append(name)
+            archive.append(entry.data)
+
+            centralDirectory.append(le32(0x0201_4B50))
+            centralDirectory.append(le16(20)); centralDirectory.append(le16(20))
+            centralDirectory.append(le16(0)); centralDirectory.append(le16(0))
+            centralDirectory.append(le16(dosTime)); centralDirectory.append(le16(dosDate))
+            centralDirectory.append(le32(crc)); centralDirectory.append(le32(size)); centralDirectory.append(le32(size))
+            centralDirectory.append(le16(UInt16(name.count)))
+            centralDirectory.append(le16(0)); centralDirectory.append(le16(0))
+            centralDirectory.append(le16(0)); centralDirectory.append(le16(0))
+            centralDirectory.append(le32(0))
+            centralDirectory.append(le32(offset))
+            centralDirectory.append(name)
+        }
+
+        let directoryOffset = UInt32(archive.count)
+        archive.append(centralDirectory)
+        archive.append(le32(0x0605_4B50))
+        archive.append(le16(0)); archive.append(le16(0))
+        archive.append(le16(UInt16(entries.count))); archive.append(le16(UInt16(entries.count)))
+        archive.append(le32(UInt32(centralDirectory.count)))
+        archive.append(le32(directoryOffset))
+        archive.append(le16(0))
+        return archive
+    }
+
+    private static let crcTable: [UInt32] = (0..<256).map { i -> UInt32 in
+        var c = UInt32(i)
+        for _ in 0..<8 { c = (c & 1) != 0 ? (0xEDB8_8320 ^ (c >> 1)) : (c >> 1) }
+        return c
+    }
+
+    private static func crc32(_ data: Data) -> UInt32 {
+        var crc: UInt32 = 0xFFFF_FFFF
+        for byte in data { crc = crcTable[Int((crc ^ UInt32(byte)) & 0xFF)] ^ (crc >> 8) }
+        return crc ^ 0xFFFF_FFFF
+    }
+
+    private static func le16(_ v: UInt16) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+    private static func le32(_ v: UInt32) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+}
+
+// MARK: - 4. Radial Pie Menu View & Geometry
+
+public enum WheelGeometry {
+    public static let panelSize: CGFloat = 440
+    public static let outerRadius: CGFloat = 150
+    public static let innerRadius: CGFloat = 62
+    public static let selectionRadius: CGFloat = 215
+    public static let gapDegrees: Double = 3.5
+}
+
+enum Theme {
+    static let accent = Color(red: 0.94, green: 0.30, blue: 0.12)
+    static let accentLight = Color(red: 1.0, green: 0.56, blue: 0.24)
+}
 
 public struct AnnularSectorShape: Shape {
     public var startAngle: Angle
     public var endAngle: Angle
     public var innerRadius: CGFloat
     public var outerRadius: CGFloat
+
+    public var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(innerRadius, outerRadius) }
+        set { innerRadius = newValue.first; outerRadius = newValue.second }
+    }
 
     public func path(in rect: CGRect) -> Path {
         let center = CGPoint(x: rect.midX, y: rect.midY)
@@ -433,101 +797,383 @@ public struct AnnularSectorShape: Shape {
     }
 }
 
-public struct RadialWheelView: View {
-    public let fileURL: URL
-    public let mode: WheelMode
-    @Binding public var hoveredSlice: RadialSlice?
-    public var onSelectSlice: (RadialSlice) -> Void
+@MainActor
+public final class WheelState: ObservableObject {
+    public let fileURLs: [URL]
+    public let interaction: WheelInteraction
+    public let fileIcon: NSImage
 
-    private let wheelDiameter: CGFloat = 310
-    private let outerRadius: CGFloat = 144
-    private let innerRadius: CGFloat = 58
-    private let gapDegrees: Double = 4.0
+    @Published public private(set) var mode: WheelMode
+    @Published public private(set) var config: RadialMenuConfiguration
+    @Published public private(set) var hoveredID: String?
+    @Published public private(set) var pointerAngle: Double = -90
+    @Published public private(set) var pointerActive = false
+    @Published public var isPresented = false
+    @Published public var committedID: String?
 
-    private var config: RadialMenuConfiguration {
-        RadialMenuConfiguration.build(for: fileURL, mode: mode)
+    public var onCommit: ((RadialSlice) -> Void)?
+    public var onDismiss: (() -> Void)?
+
+    public init(fileURLs: [URL], mode: WheelMode, interaction: WheelInteraction) {
+        self.fileURLs = fileURLs
+        self.mode = mode
+        self.interaction = interaction
+        self.config = RadialMenuConfiguration.build(for: fileURLs[0], mode: mode)
+        self.fileIcon = NSWorkspace.shared.icon(forFile: fileURLs[0].path)
     }
 
-    public var body: some View {
-        ZStack {
-            Circle()
-                .fill(.ultraThinMaterial)
-                .frame(width: wheelDiameter, height: wheelDiameter)
-                .overlay(Circle().strokeBorder(Color.white.opacity(0.45), lineWidth: 2))
-                .shadow(color: .black.opacity(0.28), radius: 22, x: 0, y: 10)
+    public var hoveredSlice: RadialSlice? {
+        guard let hoveredID else { return nil }
+        return config.outerSlices.first { $0.id == hoveredID }
+    }
 
-            let slices = config.outerSlices
-            let stepDegrees = 360.0 / Double(max(slices.count, 1))
+    var idleCaption: String {
+        fileURLs.count > 1 ? "\(fileURLs.count) files" : config.centerSubtitle
+    }
 
-            ForEach(Array(slices.enumerated()), id: \.element.id) { index, slice in
-                let midAngle = -90.0 + Double(index) * stepDegrees
-                let startDeg = midAngle - (stepDegrees / 2.0) + (gapDegrees / 2.0)
-                let endDeg = midAngle + (stepDegrees / 2.0) - (gapDegrees / 2.0)
-                let isHovered = (hoveredSlice == slice)
+    func actionHint(for slice: RadialSlice) -> String {
+        if slice.isTool { return slice.hint }
+        return interaction == .drag ? "Release to convert" : "Click to convert"
+    }
 
-                ZStack {
-                    AnnularSectorShape(
-                        startAngle: .degrees(startDeg),
-                        endAngle: .degrees(endDeg),
-                        innerRadius: innerRadius,
-                        outerRadius: outerRadius
-                    )
-                    .fill(
-                        isHovered
-                        ? Color(red: 0.94, green: 0.30, blue: 0.12)
-                        : Color.white.opacity(0.48)
-                    )
+    public func setMode(_ newMode: WheelMode) {
+        guard newMode != mode, committedID == nil else { return }
+        mode = newMode
+        config = RadialMenuConfiguration.build(for: fileURLs[0], mode: newMode)
+        hoveredID = nil
+        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+    }
 
-                    let labelRadius = (innerRadius + outerRadius) / 2.0
-                    let rad = midAngle * .pi / 180.0
-                    VStack(spacing: 4) {
-                        if let icon = slice.systemIcon {
-                            Image(systemName: icon)
-                                .font(.system(size: 15, weight: .semibold))
-                        }
-                        Text(slice.title)
-                            .font(.system(size: slice.systemIcon == nil ? 13 : 10, weight: .bold, design: .rounded))
-                    }
-                    .foregroundColor(isHovered ? .white : .black.opacity(0.85))
-                    .offset(x: cos(rad) * labelRadius, y: sin(rad) * labelRadius)
-                }
-                .onHover { hovering in
-                    hoveredSlice = hovering ? slice : (hoveredSlice == slice ? nil : hoveredSlice)
-                }
-                .onTapGesture {
-                    onSelectSlice(slice)
-                }
-            }
+    public func updatePointer(dx: CGFloat, dy: CGFloat) {
+        guard committedID == nil else { return }
+        let distance = hypot(dx, dy)
+        let degrees = Double(atan2(-dy, dx)) * 180 / .pi
 
-            if let centerSlice = config.centerSlice {
-                let isCenterHovered = (hoveredSlice == centerSlice)
-                Button {
-                    onSelectSlice(centerSlice)
-                } label: {
-                    Text(centerSlice.title)
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .foregroundColor(isCenterHovered ? .white : .black.opacity(0.85))
-                        .frame(width: 82, height: 50)
-                        .background(
-                            Capsule().fill(isCenterHovered ? Color(red: 0.94, green: 0.30, blue: 0.12) : Color.white.opacity(0.6))
-                        )
-                }
-                .buttonStyle(.plain)
-                .onHover { hovering in hoveredSlice = hovering ? centerSlice : nil }
-            } else {
-                Text(config.centerSubtitle)
-                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .foregroundColor(.black.opacity(0.8))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(Capsule().fill(Color.white.opacity(0.55)))
+        let active = distance >= WheelGeometry.innerRadius * 0.55
+        if active != pointerActive { pointerActive = active }
+        if active {
+            var delta = (degrees - pointerAngle).truncatingRemainder(dividingBy: 360)
+            if delta > 180 { delta -= 360 } else if delta < -180 { delta += 360 }
+            if abs(delta) > 0.5 { pointerAngle += delta }
+        }
+
+        let slices = config.outerSlices
+        var newID: String?
+        if !slices.isEmpty, distance >= WheelGeometry.innerRadius - 6, distance <= WheelGeometry.selectionRadius {
+            let step = 360.0 / Double(slices.count)
+            var relative = (degrees + 90).truncatingRemainder(dividingBy: 360)
+            if relative < 0 { relative += 360 }
+            newID = slices[Int((relative / step).rounded()) % slices.count].id
+        }
+        if newID != hoveredID {
+            hoveredID = newID
+            if newID != nil {
+                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
             }
         }
-        .frame(width: 340, height: 340)
+    }
+
+    public func commitCurrentSelection() {
+        guard committedID == nil, let slice = hoveredSlice else { return }
+        committedID = slice.id
+        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { [weak self] in
+            self?.onCommit?(slice)
+        }
     }
 }
 
-// MARK: - 5. Crop Image Window (Matches 00:07 - 00:10 in Video)
+public struct RadialWheelView: View {
+    @ObservedObject public var state: WheelState
+
+    public init(state: WheelState) { self.state = state }
+
+    public var body: some View {
+        let slices = state.config.outerSlices
+        let step = 360.0 / Double(max(slices.count, 1))
+        let committed = state.committedID != nil
+        let glowRadius = WheelGeometry.outerRadius + 55
+
+        ZStack {
+            // Ambient glow that blooms while something is targeted
+            Circle()
+                .fill(RadialGradient(colors: [Theme.accent.opacity(0.42), Theme.accent.opacity(0)],
+                                     center: .center,
+                                     startRadius: WheelGeometry.outerRadius * 0.7,
+                                     endRadius: glowRadius))
+                .frame(width: glowRadius * 2, height: glowRadius * 2)
+                .opacity(state.hoveredID == nil ? 0.2 : 1)
+
+            // Frosted base disc
+            Circle()
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    Circle().strokeBorder(
+                        LinearGradient(colors: [.white.opacity(0.85), .white.opacity(0.2)],
+                                       startPoint: .top, endPoint: .bottom),
+                        lineWidth: 1.5)
+                )
+                .frame(width: WheelGeometry.outerRadius * 2 + 12, height: WheelGeometry.outerRadius * 2 + 12)
+                .shadow(color: .black.opacity(0.32), radius: 26, x: 0, y: 12)
+
+            // Slices
+            ForEach(Array(slices.enumerated()), id: \.element.id) { index, slice in
+                WheelSliceView(
+                    slice: slice,
+                    midAngle: -90 + Double(index) * step,
+                    step: step,
+                    isHovered: state.hoveredID == slice.id,
+                    isCommitted: state.committedID == slice.id,
+                    isDimmed: committed && state.committedID != slice.id
+                )
+                .opacity(state.isPresented ? 1 : 0)
+                .scaleEffect(state.isPresented ? 1 : 0.6)
+                .animation(.spring(response: 0.38, dampingFraction: 0.7)
+                            .delay(state.isPresented && !committed ? Double(index) * 0.025 : 0),
+                           value: state.isPresented)
+            }
+
+            // Directional pointer triangle on rim
+            if !slices.isEmpty {
+                WheelPointer(angle: state.pointerAngle, radius: WheelGeometry.outerRadius + 26)
+                    .opacity(state.pointerActive && !committed ? 1 : 0)
+            }
+
+            // Central dynamic hub
+            WheelHub(state: state)
+        }
+        .frame(width: WheelGeometry.panelSize, height: WheelGeometry.panelSize)
+        .contentShape(Circle())
+        .onContinuousHover { phase in
+            guard state.interaction == .click else { return }
+            switch phase {
+            case .active(let loc):
+                let center = CGPoint(x: WheelGeometry.panelSize / 2, y: WheelGeometry.panelSize / 2)
+                let dx = loc.x - center.x
+                let dy = -(loc.y - center.y)
+                state.updatePointer(dx: dx, dy: dy)
+            case .ended:
+                break
+            }
+        }
+        .onTapGesture {
+            if state.hoveredSlice != nil {
+                state.commitCurrentSelection()
+            } else {
+                state.onDismiss?()
+            }
+        }
+        .scaleEffect(state.isPresented ? 1 : (committed ? 1.08 : 0.75))
+        .opacity(state.isPresented ? 1 : 0)
+        .rotationEffect(.degrees(state.isPresented || committed ? 0 : -15))
+        .animation(.spring(response: 0.32, dampingFraction: 0.76), value: state.isPresented)
+        .animation(.spring(response: 0.22, dampingFraction: 0.62), value: state.hoveredID)
+        .animation(.interpolatingSpring(stiffness: 280, damping: 24), value: state.pointerAngle)
+        .animation(.easeOut(duration: 0.12), value: state.pointerActive)
+        .animation(.spring(response: 0.30, dampingFraction: 0.8), value: state.mode)
+        .animation(.easeOut(duration: 0.14), value: state.committedID)
+    }
+}
+
+struct WheelSliceView: View {
+    let slice: RadialSlice
+    let midAngle: Double
+    let step: Double
+    let isHovered: Bool
+    let isCommitted: Bool
+    let isDimmed: Bool
+
+    var body: some View {
+        let start = midAngle - step / 2 + WheelGeometry.gapDegrees / 2
+        let end = midAngle + step / 2 - WheelGeometry.gapDegrees / 2
+        let rad = midAngle * .pi / 180
+        let pop: CGFloat = isCommitted ? 16 : (isHovered ? 10 : 0)
+        let labelRadius = (WheelGeometry.innerRadius + WheelGeometry.outerRadius) / 2 + (isHovered ? 4 : 0)
+        let sector = AnnularSectorShape(startAngle: .degrees(start), endAngle: .degrees(end),
+                                        innerRadius: WheelGeometry.innerRadius,
+                                        outerRadius: WheelGeometry.outerRadius + (isHovered ? 8 : 0))
+
+        ZStack {
+            sector
+                .fill(isHovered
+                      ? AnyShapeStyle(LinearGradient(colors: [Theme.accentLight, Theme.accent],
+                                                     startPoint: .topLeading, endPoint: .bottomTrailing))
+                      : AnyShapeStyle(Color.white.opacity(0.58)))
+                .shadow(color: Theme.accent.opacity(isHovered ? 0.65 : 0), radius: 18)
+            sector
+                .stroke(Color.white.opacity(isHovered ? 0.95 : 0.45), lineWidth: isHovered ? 1.5 : 1)
+
+            VStack(spacing: 3) {
+                if let icon = slice.systemIcon {
+                    Image(systemName: icon)
+                        .font(.system(size: isHovered ? 17 : 14, weight: .semibold))
+                }
+                Text(slice.title)
+                    .font(.system(size: slice.isTool ? 10.5 : 12.5, weight: isHovered ? .heavy : .bold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .frame(width: 74)
+            .foregroundStyle(isHovered ? Color.white : Color.black.opacity(0.78))
+            .scaleEffect(isHovered ? 1.14 : 1)
+            .offset(x: cos(rad) * labelRadius, y: sin(rad) * labelRadius)
+        }
+        .frame(width: WheelGeometry.panelSize, height: WheelGeometry.panelSize)
+        .offset(x: cos(rad) * pop, y: sin(rad) * pop)
+        .opacity(isDimmed ? 0.22 : 1)
+        .allowsHitTesting(false)
+    }
+}
+
+struct PointerTriangle: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.closeSubpath()
+        return path
+    }
+}
+
+struct WheelPointer: View {
+    let angle: Double
+    let radius: CGFloat
+
+    var body: some View {
+        PointerTriangle()
+            .fill(Theme.accent)
+            .frame(width: 16, height: 10)
+            .shadow(color: Theme.accent.opacity(0.7), radius: 4)
+            .offset(y: -radius)
+            .rotationEffect(.degrees(angle + 90))
+            .allowsHitTesting(false)
+    }
+}
+
+struct WheelHub: View {
+    @ObservedObject var state: WheelState
+
+    var body: some View {
+        let slice = state.hoveredSlice
+        let diameter = (WheelGeometry.innerRadius - 7) * 2
+
+        ZStack {
+            Circle()
+                .fill(.regularMaterial)
+                .overlay(Circle().strokeBorder(slice == nil ? Color.white.opacity(0.65) : Theme.accent,
+                                               lineWidth: slice == nil ? 1 : 2.5))
+                .shadow(color: .black.opacity(0.20), radius: 10, x: 0, y: 4)
+                .frame(width: diameter, height: diameter)
+                .scaleEffect(slice == nil ? 1 : 1.08)
+
+            if let slice {
+                VStack(spacing: 2) {
+                    Image(systemName: slice.isTool ? (slice.systemIcon ?? "wand.and.stars") : "arrow.right")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Theme.accent)
+                    Text(slice.title)
+                        .font(.system(size: 14, weight: .heavy, design: .rounded))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                    Text(state.actionHint(for: slice))
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(width: diameter - 14)
+                .id(slice.id)
+                .transition(.scale(scale: 0.6).combined(with: .opacity))
+            } else {
+                VStack(spacing: 2) {
+                    Image(nsImage: state.fileIcon)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: 32, height: 32)
+                    Text(state.config.emptyMessage ?? state.idleCaption)
+                        .font(.system(size: state.config.emptyMessage == nil ? 10 : 8, weight: .bold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                }
+                .frame(width: diameter - 14)
+                .transition(.scale(scale: 0.8).combined(with: .opacity))
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+final class WheelPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
+    init(contentRect: NSRect) {
+        super.init(
+            contentRect: contentRect,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        isFloatingPanel = true
+        level = .popUpMenu
+        backgroundColor = .clear
+        isOpaque = false
+        hasShadow = false
+        ignoresMouseEvents = false
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        acceptsMouseMovedEvents = true
+    }
+}
+
+final class WheelInteractionView: NSView {
+    var onPointer: ((CGPoint) -> Void)?
+    var canDrop: (() -> Bool)?
+    var onDrop: (() -> Bool)?
+    var onClick: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseMoved(with event: NSEvent) { report(event.locationInWindow) }
+    override func mouseDown(with event: NSEvent) {
+        report(event.locationInWindow)
+        onClick?()
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { dragOperation(sender) }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { dragOperation(sender) }
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool { canDrop?() ?? false }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        report(sender.draggingLocation)
+        return onDrop?() ?? false
+    }
+
+    private func dragOperation(_ sender: NSDraggingInfo) -> NSDragOperation {
+        report(sender.draggingLocation)
+        return (canDrop?() ?? false) ? .copy : []
+    }
+
+    private func report(_ windowPoint: NSPoint) {
+        guard let window else { return }
+        onPointer?(window.convertPoint(toScreen: windowPoint))
+    }
+}
+
+// MARK: - 5. Crop Image Window
 
 public enum CropAspectPreset: String, CaseIterable, Identifiable {
     case free = "Free", square = "1:1", widescreen = "16:9", vertical = "9:16", standard = "4:3", portrait = "3:4"
@@ -575,7 +1221,7 @@ public struct CropEditorView: View {
             GeometryReader { geo in
                 if let img = nsImage {
                     let scale = min((geo.size.width - 40) / max(naturalPixelSize.width, 1),
-                                    (geo.size.height - 30) / max(naturalPixelSize.height, 1))
+                                     (geo.size.height - 30) / max(naturalPixelSize.height, 1))
                     let w = naturalPixelSize.width * scale
                     let h = naturalPixelSize.height * scale
                     let frame = CGRect(x: (geo.size.width - w) / 2, y: (geo.size.height - h) / 2, width: w, height: h)
@@ -701,7 +1347,7 @@ public struct CropEditorView: View {
     }
 }
 
-// MARK: - 6. Add BG Window (Matches 00:14 - 00:19 in Video)
+// MARK: - 6. Add BG Window
 
 public struct BackgroundEditorView: View {
     public let sourceURL: URL
@@ -836,95 +1482,226 @@ public struct BackgroundEditorView: View {
     }
 }
 
-// MARK: - 7. Floating NSPanel & Menu Bar App Entry Point
+// MARK: - 7. App Coordinator & Floating Wheel Controller
 
 @MainActor
 public final class AppCoordinator: ObservableObject {
     public let dragMonitor = DragMonitorService()
-    private var wheelPanel: NSPanel?
+    @Published public var statusMessage: String = "Ready — Hold ⇧ while dragging in Finder"
+
+    private var wheelPanel: WheelPanel?
+    private var wheelState: WheelState?
+    private var wheelCenterPoint: CGPoint = .zero
     private var editorWindow: NSWindow?
 
     public init() {
-        dragMonitor.onStateChanged = { [weak self] in self?.syncWheelPanel() }
-        dragMonitor.onActionTriggered = { [weak self] url, action in self?.execute(action, for: url) }
+        setupDragMonitor()
         dragMonitor.startMonitoring()
     }
 
-    public func syncWheelPanel() {
-        guard dragMonitor.isWheelVisible, let firstURL = dragMonitor.activeFileURLs.first else {
-            wheelPanel?.orderOut(nil)
-            return
+    private func setupDragMonitor() {
+        dragMonitor.onWheelRequested = { [weak self] urls, mode, loc in
+            self?.showWheel(for: urls, mode: mode, at: loc, interaction: .drag)
         }
-        let size = CGSize(width: 340, height: 340)
-        let origin = CGPoint(
-            x: dragMonitor.wheelCenterScreenPoint.x - size.width / 2,
-            y: dragMonitor.wheelCenterScreenPoint.y - size.height / 2
-        )
-        if wheelPanel == nil {
-            let panel = NSPanel(
-                contentRect: CGRect(origin: origin, size: size),
-                styleMask: [.borderless, .nonactivatingPanel],
-                backing: .buffered,
-                defer: false
-            )
-            panel.level = .popUpMenu
-            panel.backgroundColor = .clear
-            panel.isOpaque = false
-            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            wheelPanel = panel
+        dragMonitor.onModeChanged = { [weak self] mode in
+            self?.wheelState?.setMode(mode)
         }
-        let view = RadialWheelView(
-            fileURL: firstURL,
-            mode: dragMonitor.activeMode,
-            hoveredSlice: Binding(
-                get: { self.dragMonitor.hoveredSlice },
-                set: { self.dragMonitor.hoveredSlice = $0 }
-            ),
-            onSelectSlice: { [weak self] slice in
-                self?.wheelPanel?.orderOut(nil)
-                self?.execute(slice.action, for: firstURL)
+        dragMonitor.onPointerMoved = { [weak self] loc in
+            guard let self, let state = self.wheelState else { return }
+            let dx = loc.x - self.wheelCenterPoint.x
+            let dy = loc.y - self.wheelCenterPoint.y
+            state.updatePointer(dx: dx, dy: dy)
+        }
+        dragMonitor.onMouseReleased = { [weak self] in
+            guard let self, let state = self.wheelState else { return }
+            if state.hoveredSlice != nil {
+                state.commitCurrentSelection()
+            } else {
+                self.hideWheel()
             }
-        )
-        wheelPanel?.contentView = NSHostingView(rootView: view)
-        wheelPanel?.setFrameOrigin(origin)
-        wheelPanel?.orderFrontRegardless()
+        }
+        dragMonitor.onMouseDown = { [weak self] in
+            if self?.wheelState?.interaction == .click {
+                // If user clicks outside the wheel during click test, dismiss
+            }
+        }
+    }
+
+    public func pickFileAndShowWheel(mode: WheelMode) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a file to test the OpenTangerine radial menu"
+        panel.prompt = "Select"
+        if panel.runModal() == .OK, let url = panel.url {
+            showWheel(for: [url], mode: mode, at: NSEvent.mouseLocation, interaction: .click)
+        }
+    }
+
+    public func showWheel(for urls: [URL], mode: WheelMode, at screenLocation: CGPoint, interaction: WheelInteraction) {
+        guard !urls.isEmpty else { return }
+
+        let panelSize = WheelGeometry.panelSize
+        var center = screenLocation
+
+        // Keep wheel on screen
+        if let screen = NSScreen.screens.first(where: { NSPointInRect(screenLocation, $0.frame) }) ?? NSScreen.main {
+            let visible = screen.visibleFrame
+            let margin = panelSize / 2 + 10
+            center.x = min(max(center.x, visible.minX + margin), visible.maxX - margin)
+            center.y = min(max(center.y, visible.minY + margin), visible.maxY - margin)
+        }
+        wheelCenterPoint = center
+
+        let origin = CGPoint(x: center.x - panelSize / 2, y: center.y - panelSize / 2)
+        let rect = CGRect(origin: origin, size: CGSize(width: panelSize, height: panelSize))
+
+        let state = WheelState(fileURLs: urls, mode: mode, interaction: interaction)
+        self.wheelState = state
+
+        state.onCommit = { [weak self] slice in
+            guard let self else { return }
+            self.hideWheel()
+            for url in urls {
+                self.execute(slice.action, for: url)
+            }
+        }
+        state.onDismiss = { [weak self] in
+            self?.hideWheel()
+        }
+
+        let panel: WheelPanel
+        if let existing = self.wheelPanel {
+            panel = existing
+            panel.setFrame(rect, display: true)
+        } else {
+            panel = WheelPanel(contentRect: rect)
+            self.wheelPanel = panel
+        }
+
+        // Host the interactive SwiftUI wheel view
+        let hostingView = NSHostingView(rootView: RadialWheelView(state: state))
+        hostingView.frame = NSRect(origin: .zero, size: rect.size)
+
+        // Overlay interaction view to support Finder drop target and mouse tracking
+        let interactionView = WheelInteractionView(frame: NSRect(origin: .zero, size: rect.size))
+        interactionView.canDrop = { [weak state] in state?.hoveredSlice != nil }
+        interactionView.onDrop = { [weak state] in
+            guard let state, state.hoveredSlice != nil else { return false }
+            state.commitCurrentSelection()
+            return true
+        }
+        interactionView.onPointer = { [weak self, weak state] screenPoint in
+            guard let self, let state else { return }
+            let dx = screenPoint.x - self.wheelCenterPoint.x
+            let dy = screenPoint.y - self.wheelCenterPoint.y
+            state.updatePointer(dx: dx, dy: dy)
+        }
+        interactionView.onClick = { [weak state] in
+            if state?.hoveredSlice != nil {
+                state?.commitCurrentSelection()
+            } else {
+                state?.onDismiss?()
+            }
+        }
+
+        let container = NSView(frame: NSRect(origin: .zero, size: rect.size))
+        container.addSubview(hostingView)
+        container.addSubview(interactionView)
+        panel.contentView = container
+
+        panel.orderFrontRegardless()
+        withAnimation {
+            state.isPresented = true
+        }
+    }
+
+    public func hideWheel() {
+        guard let state = wheelState else { return }
+        withAnimation(.easeOut(duration: 0.16)) {
+            state.isPresented = false
+        }
+        dragMonitor.endSession()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+            self?.wheelPanel?.orderOut(nil)
+            self?.wheelState = nil
+        }
     }
 
     public func execute(_ action: RadialActionType, for fileURL: URL) {
         switch action {
         case .convertToFormat(let ext):
-            if let outURL = try? FileConversionEngine.shared.convertFile(at: fileURL, to: ext) {
-                dragMonitor.statusMessage = "Saved \(outURL.lastPathComponent)"
+            do {
+                let outURL = try FileConversionEngine.shared.convertFile(at: fileURL, to: ext)
+                statusMessage = "Saved \(outURL.lastPathComponent)"
                 NSWorkspace.shared.activateFileViewerSelecting([outURL])
+            } catch {
+                statusMessage = "Failed: \(error.localizedDescription)"
+                showNotification(title: "Conversion Error", message: error.localizedDescription)
             }
+
         case .openTool(let tool):
-            if tool == .crop {
+            switch tool {
+            case .crop:
                 openEditor(CropEditorView(
                     sourceURL: fileURL,
                     onComplete: { [weak self] url in
                         self?.editorWindow?.close()
+                        self?.statusMessage = "Cropped \(url.lastPathComponent)"
                         NSWorkspace.shared.activateFileViewerSelecting([url])
                     },
                     onClose: { [weak self] in self?.editorWindow?.close() }
                 ), size: CGSize(width: 480, height: 580))
-            } else {
+
+            case .addBG:
                 openEditor(BackgroundEditorView(
                     sourceURL: fileURL,
                     onComplete: { [weak self] url in
                         self?.editorWindow?.close()
+                        self?.statusMessage = "Added BG to \(url.lastPathComponent)"
                         NSWorkspace.shared.activateFileViewerSelecting([url])
                     },
                     onClose: { [weak self] in self?.editorWindow?.close() }
                 ), size: CGSize(width: 490, height: 610))
+
+            case .compress:
+                do {
+                    let result = try FileConversionEngine.shared.compressImage(at: fileURL)
+                    let saved = RadialMenuConfiguration.formattedByteCount(result.originalBytes - result.newBytes)
+                    statusMessage = "Compressed: saved \(saved)"
+                    NSWorkspace.shared.activateFileViewerSelecting([result.output])
+                } catch {
+                    statusMessage = error.localizedDescription
+                    showNotification(title: "Compress Image", message: error.localizedDescription)
+                }
+
+            case .metadata:
+                do {
+                    let outURL = try FileConversionEngine.shared.stripMetadata(at: fileURL)
+                    statusMessage = "Stripped metadata -> \(outURL.lastPathComponent)"
+                    NSWorkspace.shared.activateFileViewerSelecting([outURL])
+                } catch {
+                    statusMessage = error.localizedDescription
+                    showNotification(title: "Strip Metadata", message: error.localizedDescription)
+                }
             }
         }
+    }
+
+    private func showNotification(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.runModal()
     }
 
     private func openEditor<V: View>(_ view: V, size: CGSize) {
         editorWindow?.close()
         let win = NSWindow(
             contentRect: CGRect(origin: .zero, size: size),
-            styleMask: [.titled, .fullSizeContentView],
+            styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -942,45 +1719,57 @@ public final class AppCoordinator: ObservableObject {
     }
 }
 
+// MARK: - 8. Menu Bar App Entry Point & CLI Support
+
 @main
 public struct OpenTangerineApp: App {
     @StateObject private var coordinator = AppCoordinator()
 
-    public init() {}
+    public init() {
+        if CommandLine.arguments.count >= 4 && CommandLine.arguments[1] == "--convert" {
+            let targetExt = CommandLine.arguments[2]
+            let filePath = CommandLine.arguments[3]
+            let url = URL(fileURLWithPath: filePath)
+            do {
+                let out = try FileConversionEngine.shared.convertFile(at: url, to: targetExt)
+                print("Converted: \(out.path)")
+                exit(0)
+            } catch {
+                fputs("Error: \(error.localizedDescription)\n", stderr)
+                exit(1)
+            }
+        }
+    }
 
     public var body: some Scene {
         MenuBarExtra("OpenTangerine", systemImage: "circle.hexagongrid.fill") {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("OpenTangerine for macOS").font(.headline)
-                Text(coordinator.dragMonitor.statusMessage)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(nsImage: NSImage(named: "AppIcon") ?? NSApp.applicationIconImage)
+                        .resizable()
+                        .frame(width: 28, height: 28)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("OpenTangerine").font(.headline)
+                        Text(coordinator.statusMessage)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
                 Divider()
-                Text("• Hold Shift (⇧) + Drag file: Convert Wheel").font(.caption)
+                Text("• Hold Shift (⇧) + Drag: Convert Wheel").font(.caption)
                 Text("• Hold Option + Shift (⌥⇧) + Drag: Tools Wheel").font(.caption)
                 Divider()
                 Button("Pick File to Test Convert Wheel…") {
-                    let panel = NSOpenPanel()
-                    if panel.runModal() == .OK, let url = panel.url {
-                        coordinator.dragMonitor.activeFileURLs = [url]
-                        coordinator.dragMonitor.activeMode = .convert
-                        coordinator.dragMonitor.wheelCenterScreenPoint = NSEvent.mouseLocation
-                        coordinator.dragMonitor.isWheelVisible = true
-                        coordinator.syncWheelPanel()
-                    }
+                    coordinator.pickFileAndShowWheel(mode: .convert)
                 }
                 Button("Pick File to Test Tools Wheel…") {
-                    let panel = NSOpenPanel()
-                    if panel.runModal() == .OK, let url = panel.url {
-                        coordinator.dragMonitor.activeFileURLs = [url]
-                        coordinator.dragMonitor.activeMode = .tools
-                        coordinator.dragMonitor.wheelCenterScreenPoint = NSEvent.mouseLocation
-                        coordinator.dragMonitor.isWheelVisible = true
-                        coordinator.syncWheelPanel()
-                    }
+                    coordinator.pickFileAndShowWheel(mode: .tools)
                 }
                 Divider()
-                Button("Quit OpenTangerine") { NSApplication.shared.terminate(nil) }
+                Button("Quit OpenTangerine") {
+                    NSApplication.shared.terminate(nil)
+                }
+                .keyboardShortcut("q")
             }
             .padding(12)
         }
