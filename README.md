@@ -19,9 +19,20 @@ original file and revealed in Finder.
 | Gesture | Wheel | What you get |
 |---|---|---|
 | **⇧ Shift + Drag** | Convert | PDF → DOCX / JPG / PNG / TXT · Images → PNG / WEBP / HEIC / JPG / AVIF / BMP / PDF / DOCX / TIFF |
-| **⌥⇧ Option + Shift + Drag** | Tools | Crop (aspect presets, pixel dimensions) · Add BG (gradients, padding, corners, shadow) |
+| **⌥⇧ Option + Shift + Drag** | Tools | Crop (aspect presets, pixel dimensions) · Add BG (backdrop, corners, shadow) · Metadata (EXIF/GPS inspector & clean export) · Compress |
 
 Everything runs **100% offline** using Apple frameworks (PDFKit, ImageIO, CoreGraphics, SwiftUI).
+
+### 🎨 Customizable Themes & Liquid Glass
+
+Customize the look and feel from the menu bar or **Theme & Appearance Settings** (`⌘,`):
+- **Tangerine Sunset**: The signature citrus orange with warm amber glow
+- **Liquid Glass**: Translucent fluid glass with specular iridescent rim and a live **customizable transparency slider** (Crystal, Balanced, Frosted) that connects to macOS System Settings (*Accessibility → Display → Reduce Transparency*)
+- **Cyber Cyan**: Electric neon cyan with cyber glow
+- **Neon Violet**: Deep ultraviolet with magenta luminescence
+- **Emerald Mint**: Fresh botanical mint & emerald green
+- **Solar Gold**: Radiant amber with golden warmth
+- **Monochrome**: Clean minimalist slate & frosted white
 
 ## 📦 Install
 

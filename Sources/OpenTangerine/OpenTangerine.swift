@@ -89,7 +89,7 @@ public enum ToolKind: String, CaseIterable, Identifiable {
         switch self {
         case .crop: return "Crop & resize"
         case .compress: return "Shrink file size"
-        case .metadata: return "Strip EXIF & GPS"
+        case .metadata: return "Inspect EXIF & GPS"
         case .addBG: return "Add a backdrop"
         }
     }
@@ -771,9 +771,212 @@ public enum WheelGeometry {
     public static let gapDegrees: Double = 3.5
 }
 
-enum Theme {
-    static let accent = Color(red: 0.94, green: 0.30, blue: 0.12)
-    static let accentLight = Color(red: 1.0, green: 0.56, blue: 0.24)
+// MARK: - Theme System & Liquid Glass Customization
+
+public enum ThemePreset: String, CaseIterable, Identifiable {
+    case tangerine = "Tangerine"
+    case liquidGlass = "Liquid Glass"
+    case cyberCyan = "Cyber Cyan"
+    case neonViolet = "Neon Violet"
+    case emeraldMint = "Emerald Mint"
+    case solarGold = "Solar Gold"
+    case monochrome = "Monochrome"
+
+    public var id: String { rawValue }
+    public var name: String { rawValue }
+
+    public var systemIcon: String {
+        switch self {
+        case .tangerine: return "sun.max.fill"
+        case .liquidGlass: return "drop.fill"
+        case .cyberCyan: return "bolt.fill"
+        case .neonViolet: return "sparkles"
+        case .emeraldMint: return "leaf.fill"
+        case .solarGold: return "flame.fill"
+        case .monochrome: return "circle.lefthalf.filled"
+        }
+    }
+
+    public var accent: Color {
+        switch self {
+        case .tangerine:
+            return Color(red: 0.94, green: 0.30, blue: 0.12)
+        case .liquidGlass:
+            return Color(red: 0.15, green: 0.65, blue: 0.98)
+        case .cyberCyan:
+            return Color(red: 0.0, green: 0.85, blue: 0.95)
+        case .neonViolet:
+            return Color(red: 0.68, green: 0.32, blue: 0.98)
+        case .emeraldMint:
+            return Color(red: 0.08, green: 0.80, blue: 0.52)
+        case .solarGold:
+            return Color(red: 0.98, green: 0.66, blue: 0.12)
+        case .monochrome:
+            return Color(white: 0.92)
+        }
+    }
+
+    public var accentLight: Color {
+        switch self {
+        case .tangerine:
+            return Color(red: 1.0, green: 0.56, blue: 0.24)
+        case .liquidGlass:
+            return Color(red: 0.65, green: 0.88, blue: 1.0)
+        case .cyberCyan:
+            return Color(red: 0.45, green: 0.95, blue: 1.0)
+        case .neonViolet:
+            return Color(red: 0.88, green: 0.52, blue: 1.0)
+        case .emeraldMint:
+            return Color(red: 0.40, green: 0.94, blue: 0.72)
+        case .solarGold:
+            return Color(red: 1.0, green: 0.82, blue: 0.38)
+        case .monochrome:
+            return Color(white: 1.0)
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .tangerine: return "Citrus orange with warm glow"
+        case .liquidGlass: return "Fluid frosted glass & specular highlights"
+        case .cyberCyan: return "Vibrant electric neon cyan"
+        case .neonViolet: return "Luminous ultraviolet & magenta"
+        case .emeraldMint: return "Fresh botanical mint & emerald"
+        case .solarGold: return "Radiant amber & golden warmth"
+        case .monochrome: return "Clean minimalist slate & frosty white"
+        }
+    }
+}
+
+@MainActor
+public final class ThemeManager: ObservableObject {
+    public static let shared = ThemeManager()
+
+    @Published public var currentTheme: ThemePreset {
+        didSet {
+            UserDefaults.standard.set(currentTheme.rawValue, forKey: "OpenTangerine.selectedThemePreset")
+        }
+    }
+
+    /// Opacity of the liquid glass base material (0.10 ... 0.90).
+    /// Lower value = more translucent, higher value = more frosted.
+    @Published public var liquidGlassOpacity: Double {
+        didSet {
+            UserDefaults.standard.set(liquidGlassOpacity, forKey: "OpenTangerine.liquidGlassOpacity")
+        }
+    }
+
+    /// Whether to respect and adapt to macOS System Settings (Reduce Transparency)
+    @Published public var syncWithSystemSettings: Bool {
+        didSet {
+            UserDefaults.standard.set(syncWithSystemSettings, forKey: "OpenTangerine.syncWithSystemSettings")
+        }
+    }
+
+    /// Live state of macOS System Settings -> Accessibility -> Display -> Reduce Transparency
+    @Published public private(set) var systemReduceTransparency: Bool = false
+
+    private init() {
+        let savedPreset = UserDefaults.standard.string(forKey: "OpenTangerine.selectedThemePreset")
+        self.currentTheme = savedPreset.flatMap(ThemePreset.init(rawValue:)) ?? .tangerine
+
+        let savedOpacity = UserDefaults.standard.double(forKey: "OpenTangerine.liquidGlassOpacity")
+        self.liquidGlassOpacity = savedOpacity > 0 ? savedOpacity : 0.40
+
+        if UserDefaults.standard.object(forKey: "OpenTangerine.syncWithSystemSettings") != nil {
+            self.syncWithSystemSettings = UserDefaults.standard.bool(forKey: "OpenTangerine.syncWithSystemSettings")
+        } else {
+            self.syncWithSystemSettings = true
+        }
+
+        self.systemReduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+
+        NotificationCenter.default.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.systemReduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+            }
+        }
+    }
+
+    public var isLiquidGlass: Bool {
+        currentTheme == .liquidGlass
+    }
+
+    public var accent: Color {
+        currentTheme.accent
+    }
+
+    public var accentLight: Color {
+        currentTheme.accentLight
+    }
+
+    public var effectiveGlassOpacity: Double {
+        if syncWithSystemSettings && systemReduceTransparency {
+            return 0.92
+        }
+        return liquidGlassOpacity
+    }
+
+    public var transparencyPercentage: Int {
+        Int(round((1.0 - effectiveGlassOpacity) * 100))
+    }
+}
+
+@MainActor
+public enum Theme {
+    public static var manager: ThemeManager { ThemeManager.shared }
+    public static var accent: Color { ThemeManager.shared.accent }
+    public static var accentLight: Color { ThemeManager.shared.accentLight }
+    public static var isLiquidGlass: Bool { ThemeManager.shared.isLiquidGlass }
+    public static var glassOpacity: Double { ThemeManager.shared.effectiveGlassOpacity }
+}
+
+public struct LiquidWindowBackground: View {
+    @ObservedObject var theme = ThemeManager.shared
+
+    public init() {}
+
+    public var body: some View {
+        ZStack {
+            if theme.isLiquidGlass {
+                Rectangle()
+                    .fill(.ultraThinMaterial.opacity(theme.effectiveGlassOpacity))
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.18 * (1.0 - theme.effectiveGlassOpacity * 0.7)),
+                                Color.cyan.opacity(0.06 * (1.0 - theme.effectiveGlassOpacity * 0.7)),
+                                Color.clear
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                RoundedRectangle(cornerRadius: 14)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.8),
+                                Color.cyan.opacity(0.35),
+                                Color.purple.opacity(0.2),
+                                Color.white.opacity(0.5)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1.2
+                    )
+            } else {
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+            }
+        }
+    }
 }
 
 public struct AnnularSectorShape: Shape {
@@ -885,6 +1088,7 @@ public final class WheelState: ObservableObject {
 
 public struct RadialWheelView: View {
     @ObservedObject public var state: WheelState
+    @ObservedObject private var theme = ThemeManager.shared
 
     public init(state: WheelState) { self.state = state }
 
@@ -897,24 +1101,62 @@ public struct RadialWheelView: View {
         ZStack {
             // Ambient glow that blooms while something is targeted
             Circle()
-                .fill(RadialGradient(colors: [Theme.accent.opacity(0.42), Theme.accent.opacity(0)],
-                                     center: .center,
-                                     startRadius: WheelGeometry.outerRadius * 0.7,
-                                     endRadius: glowRadius))
+                .fill(RadialGradient(
+                    colors: theme.isLiquidGlass
+                        ? [Color.cyan.opacity(0.38), Color.purple.opacity(0.20), Color.clear]
+                        : [theme.accent.opacity(0.42), theme.accent.opacity(0)],
+                    center: .center,
+                    startRadius: WheelGeometry.outerRadius * 0.7,
+                    endRadius: glowRadius
+                ))
                 .frame(width: glowRadius * 2, height: glowRadius * 2)
                 .opacity(state.hoveredID == nil ? 0.2 : 1)
 
-            // Frosted base disc
-            Circle()
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    Circle().strokeBorder(
-                        LinearGradient(colors: [.white.opacity(0.85), .white.opacity(0.2)],
-                                       startPoint: .top, endPoint: .bottom),
-                        lineWidth: 1.5)
-                )
-                .frame(width: WheelGeometry.outerRadius * 2 + 12, height: WheelGeometry.outerRadius * 2 + 12)
-                .shadow(color: .black.opacity(0.32), radius: 26, x: 0, y: 12)
+            // Frosted / Liquid Glass base disc
+            if theme.isLiquidGlass {
+                Circle()
+                    .fill(.ultraThinMaterial.opacity(theme.effectiveGlassOpacity))
+                    .background(
+                        Circle().fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.25 * (1.0 - theme.effectiveGlassOpacity * 0.7)),
+                                    Color.cyan.opacity(0.08 * (1.0 - theme.effectiveGlassOpacity * 0.7))
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    )
+                    .overlay(
+                        Circle().strokeBorder(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.9),
+                                    Color.cyan.opacity(0.5),
+                                    Color.purple.opacity(0.3),
+                                    Color.white.opacity(0.7)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1.5
+                        )
+                    )
+                    .frame(width: WheelGeometry.outerRadius * 2 + 12, height: WheelGeometry.outerRadius * 2 + 12)
+                    .shadow(color: Color.cyan.opacity(0.25), radius: 26, x: 0, y: 12)
+            } else {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        Circle().strokeBorder(
+                            LinearGradient(colors: [.white.opacity(0.85), .white.opacity(0.2)],
+                                           startPoint: .top, endPoint: .bottom),
+                            lineWidth: 1.5)
+                    )
+                    .frame(width: WheelGeometry.outerRadius * 2 + 12, height: WheelGeometry.outerRadius * 2 + 12)
+                    .shadow(color: .black.opacity(0.32), radius: 26, x: 0, y: 12)
+            }
 
             // Slices
             ForEach(Array(slices.enumerated()), id: \.element.id) { index, slice in
@@ -976,6 +1218,7 @@ public struct RadialWheelView: View {
 }
 
 struct WheelSliceView: View {
+    @ObservedObject private var theme = ThemeManager.shared
     let slice: RadialSlice
     let midAngle: Double
     let step: Double
@@ -996,12 +1239,20 @@ struct WheelSliceView: View {
         ZStack {
             sector
                 .fill(isHovered
-                      ? AnyShapeStyle(LinearGradient(colors: [Theme.accentLight, Theme.accent],
-                                                     startPoint: .topLeading, endPoint: .bottomTrailing))
-                      : AnyShapeStyle(Color.white.opacity(0.58)))
-                .shadow(color: Theme.accent.opacity(isHovered ? 0.65 : 0), radius: 18)
+                      ? AnyShapeStyle(LinearGradient(
+                            colors: theme.isLiquidGlass
+                                ? [Color.white.opacity(0.88), theme.accent.opacity(0.85)]
+                                : [theme.accentLight, theme.accent],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ))
+                      : AnyShapeStyle(theme.isLiquidGlass
+                            ? Color.white.opacity(max(0.12, 0.45 * theme.effectiveGlassOpacity))
+                            : Color.white.opacity(0.58)))
+                .shadow(color: theme.accent.opacity(isHovered ? 0.65 : 0), radius: 18)
             sector
-                .stroke(Color.white.opacity(isHovered ? 0.95 : 0.45), lineWidth: isHovered ? 1.5 : 1)
+                .stroke(Color.white.opacity(isHovered ? 0.95 : (theme.isLiquidGlass ? 0.35 : 0.45)),
+                        lineWidth: isHovered ? 1.5 : 1)
 
             VStack(spacing: 3) {
                 if let icon = slice.systemIcon {
@@ -1014,7 +1265,9 @@ struct WheelSliceView: View {
                     .minimumScaleFactor(0.7)
             }
             .frame(width: 74)
-            .foregroundStyle(isHovered ? Color.white : Color.black.opacity(0.78))
+            .foregroundStyle(isHovered
+                ? (theme.currentTheme == .monochrome ? Color.black : Color.white)
+                : (theme.isLiquidGlass ? Color.primary.opacity(0.88) : Color.black.opacity(0.78)))
             .scaleEffect(isHovered ? 1.14 : 1)
             .offset(x: cos(rad) * labelRadius, y: sin(rad) * labelRadius)
         }
@@ -1053,6 +1306,7 @@ struct WheelPointer: View {
 
 struct WheelHub: View {
     @ObservedObject var state: WheelState
+    @ObservedObject private var theme = ThemeManager.shared
 
     var body: some View {
         let slice = state.hoveredSlice
@@ -1060,8 +1314,12 @@ struct WheelHub: View {
 
         ZStack {
             Circle()
-                .fill(.regularMaterial)
-                .overlay(Circle().strokeBorder(slice == nil ? Color.white.opacity(0.65) : Theme.accent,
+                .fill(theme.isLiquidGlass
+                      ? AnyShapeStyle(.ultraThinMaterial.opacity(theme.effectiveGlassOpacity))
+                      : AnyShapeStyle(.regularMaterial))
+                .overlay(Circle().strokeBorder(slice == nil
+                                               ? (theme.isLiquidGlass ? Color.white.opacity(0.8) : Color.white.opacity(0.65))
+                                               : theme.accent,
                                                lineWidth: slice == nil ? 1 : 2.5))
                 .shadow(color: .black.opacity(0.20), radius: 10, x: 0, y: 4)
                 .frame(width: diameter, height: diameter)
@@ -1071,7 +1329,7 @@ struct WheelHub: View {
                 VStack(spacing: 2) {
                     Image(systemName: slice.isTool ? (slice.systemIcon ?? "wand.and.stars") : "arrow.right")
                         .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(Theme.accent)
+                        .foregroundStyle(theme.accent)
                     Text(slice.title)
                         .font(.system(size: 14, weight: .heavy, design: .rounded))
                         .lineLimit(1)
@@ -1201,7 +1459,7 @@ public struct CropEditorView: View {
     @State private var selectedPreset: CropAspectPreset = .free
     @State private var widthInput = "2550"
     @State private var heightInput = "3300"
-    private let accentOrange = Color(red: 0.94, green: 0.30, blue: 0.12)
+    @ObservedObject private var theme = ThemeManager.shared
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -1239,12 +1497,12 @@ public struct CropEditorView: View {
                             .position(x: frame.midX, y: frame.midY)
 
                         Rectangle()
-                            .stroke(accentOrange, lineWidth: 2)
+                            .stroke(theme.accent, lineWidth: 2)
                             .frame(width: cropRect.width, height: cropRect.height)
                             .position(x: cropRect.midX, y: cropRect.midY)
 
                         RoundedRectangle(cornerRadius: 3)
-                            .fill(accentOrange)
+                            .fill(theme.accent)
                             .frame(width: 26, height: 8)
                             .position(x: cropRect.midX, y: cropRect.maxY)
                             .gesture(
@@ -1276,8 +1534,8 @@ public struct CropEditorView: View {
                         }
                         .buttonStyle(.plain)
                         .padding(.horizontal, 10).padding(.vertical, 4)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(selectedPreset == preset ? accentOrange : Color.clear))
-                        .foregroundColor(selectedPreset == preset ? .white : .primary)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(selectedPreset == preset ? theme.accent : Color.clear))
+                        .foregroundColor(selectedPreset == preset ? (theme.currentTheme == .monochrome ? .black : .white) : .primary)
                     }
                 }
 
@@ -1300,14 +1558,14 @@ public struct CropEditorView: View {
                     Button("Apply") { applyCrop() }
                         .buttonStyle(.plain)
                         .padding(.horizontal, 18).padding(.vertical, 7)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(accentOrange))
-                        .foregroundColor(.white)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(theme.accent))
+                        .foregroundColor(theme.currentTheme == .monochrome ? .black : .white)
                 }
             }
             .padding(18)
         }
         .frame(width: 480, height: 580)
-        .background(.ultraThinMaterial)
+        .background(LiquidWindowBackground())
         .onAppear {
             if let img = NSImage(contentsOf: sourceURL) {
                 nsImage = img
@@ -1361,7 +1619,7 @@ public struct BackgroundEditorView: View {
     @State private var selectedPresetIndex: Int = 0
     @State private var selectedRatio: String = "Auto"
 
-    private let accentOrange = Color(red: 0.94, green: 0.30, blue: 0.12)
+    @ObservedObject private var theme = ThemeManager.shared
     private let gradients: [[Color]] = [
         [Color(red: 0.96, green: 0.25, blue: 0.34), Color(red: 0.99, green: 0.72, blue: 0.14), Color(red: 0.52, green: 0.36, blue: 0.85)],
         [Color.cyan, Color.blue, Color.indigo],
@@ -1398,7 +1656,7 @@ public struct BackgroundEditorView: View {
                             RoundedRectangle(cornerRadius: 6)
                                 .fill(LinearGradient(colors: gradients[idx], startPoint: .topLeading, endPoint: .bottomTrailing))
                                 .frame(width: 30, height: 30)
-                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(selectedPresetIndex == idx ? accentOrange : .clear, lineWidth: 2))
+                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(selectedPresetIndex == idx ? theme.accent : .clear, lineWidth: 2))
                         }.buttonStyle(.plain)
                     }
                 }
@@ -1414,8 +1672,8 @@ public struct BackgroundEditorView: View {
                         Button(r) { selectedRatio = r }
                             .buttonStyle(.plain)
                             .padding(.horizontal, 12).padding(.vertical, 5)
-                            .background(RoundedRectangle(cornerRadius: 6).fill(selectedRatio == r ? accentOrange : Color.clear))
-                            .foregroundColor(selectedRatio == r ? .white : .primary)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(selectedRatio == r ? theme.accent : Color.clear))
+                            .foregroundColor(selectedRatio == r ? (theme.currentTheme == .monochrome ? .black : .white) : .primary)
                     }
                 }
 
@@ -1427,14 +1685,14 @@ public struct BackgroundEditorView: View {
                     Button("Save with Background") { saveComposite() }
                         .buttonStyle(.plain)
                         .padding(.horizontal, 18).padding(.vertical, 8)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(accentOrange))
-                        .foregroundColor(.white)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(theme.accent))
+                        .foregroundColor(theme.currentTheme == .monochrome ? .black : .white)
                 }
             }
             .padding(20)
         }
         .frame(width: 490, height: 610)
-        .background(.ultraThinMaterial)
+        .background(LiquidWindowBackground())
         .onAppear { nsImage = NSImage(contentsOf: sourceURL) }
     }
 
@@ -1442,7 +1700,7 @@ public struct BackgroundEditorView: View {
     private func sliderRow(_ label: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
         HStack {
             Text(label).font(.system(size: 12)).foregroundColor(.secondary).frame(width: 76, alignment: .leading)
-            Slider(value: value, in: range).tint(accentOrange)
+            Slider(value: value, in: range).tint(theme.accent)
             Text("\(Int(round(value.wrappedValue))) px")
                 .font(.system(size: 12, design: .monospaced))
                 .frame(width: 56, alignment: .trailing)
@@ -1482,7 +1740,933 @@ public struct BackgroundEditorView: View {
     }
 }
 
-// MARK: - 7. App Coordinator & Floating Wheel Controller
+// MARK: - 7. Metadata Inspector Window
+
+public struct ImageMetadataItem: Identifiable, Sendable {
+    public let id = UUID()
+    public let label: String
+    public let value: String
+
+    public init(label: String, value: String) {
+        self.label = label
+        self.value = value
+    }
+}
+
+public struct ImageMetadataSection: Identifiable, Sendable {
+    public let id = UUID()
+    public let title: String
+    public let icon: String
+    public let items: [ImageMetadataItem]
+
+    public init(title: String, icon: String, items: [ImageMetadataItem]) {
+        self.title = title
+        self.icon = icon
+        self.items = items
+    }
+}
+
+public struct GPSCoordinate: Sendable {
+    public let lat: Double
+    public let lon: Double
+
+    public init(lat: Double, lon: Double) {
+        self.lat = lat
+        self.lon = lon
+    }
+}
+
+public struct ImageMetadataReport: Sendable {
+    public let fileName: String
+    public let fileSize: String
+    public let dimensions: String
+    public let megapixels: String
+    public let format: String
+    public let colorProfile: String
+    public let cameraSummary: String?
+    public let exposureSummary: String?
+    public let shutterSpeed: String?
+    public let aperture: String?
+    public let iso: String?
+    public let focalLength: String?
+    public let gpsCoordinate: GPSCoordinate?
+    public let hasEXIFOrGPS: Bool
+    public let sections: [ImageMetadataSection]
+    public let fullTextSummary: String
+
+    public static func load(from url: URL) -> ImageMetadataReport {
+        let fileAttrs = (try? FileManager.default.attributesOfItem(atPath: url.path)) ?? [:]
+        let fileSizeBytes = (fileAttrs[.size] as? NSNumber)?.int64Value ?? 0
+        let fileSizeStr = ByteCountFormatter.string(fromByteCount: fileSizeBytes, countStyle: .file)
+        let ext = url.pathExtension.uppercased()
+
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            return ImageMetadataReport(
+                fileName: url.lastPathComponent,
+                fileSize: fileSizeStr,
+                dimensions: "Unknown",
+                megapixels: "",
+                format: ext,
+                colorProfile: "",
+                cameraSummary: nil,
+                exposureSummary: nil,
+                shutterSpeed: nil,
+                aperture: nil,
+                iso: nil,
+                focalLength: nil,
+                gpsCoordinate: nil,
+                hasEXIFOrGPS: false,
+                sections: [],
+                fullTextSummary: "Could not read metadata for \(url.lastPathComponent)"
+            )
+        }
+
+        let props = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any]
+        let iptc = props[kCGImagePropertyIPTCDictionary] as? [CFString: Any]
+
+        let pixelW = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+        let pixelH = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+
+        let dimStr = (pixelW > 0 && pixelH > 0) ? "\(pixelW) × \(pixelH) px" : "Unknown"
+        let mpStr = (pixelW > 0 && pixelH > 0) ? String(format: "%.1f MP", Double(pixelW * pixelH) / 1_000_000.0) : ""
+
+        let colorModel = (props[kCGImagePropertyColorModel] as? String) ?? ""
+        let profileName = (props[kCGImagePropertyProfileName] as? String) ?? ""
+        let dpiW = (props[kCGImagePropertyDPIWidth] as? NSNumber)?.intValue ?? 0
+        let dpiH = (props[kCGImagePropertyDPIHeight] as? NSNumber)?.intValue ?? 0
+        let depth = (props[kCGImagePropertyDepth] as? NSNumber)?.intValue ?? 0
+
+        var sections: [ImageMetadataSection] = []
+
+        // 1. File & Image specs
+        var fileItems: [ImageMetadataItem] = [
+            ImageMetadataItem(label: "Dimensions", value: dimStr + (mpStr.isEmpty ? "" : " (\(mpStr))")),
+            ImageMetadataItem(label: "File Size", value: fileSizeStr),
+            ImageMetadataItem(label: "Format", value: ext)
+        ]
+        if !colorModel.isEmpty {
+            let depthStr = depth > 0 ? " (\(depth)-bit)" : ""
+            fileItems.append(ImageMetadataItem(label: "Color Model", value: "\(colorModel)\(depthStr)"))
+        }
+        if !profileName.isEmpty {
+            fileItems.append(ImageMetadataItem(label: "Color Profile", value: profileName))
+        }
+        if dpiW > 0 && dpiH > 0 {
+            fileItems.append(ImageMetadataItem(label: "Resolution", value: "\(dpiW) × \(dpiH) DPI"))
+        }
+        if let modDate = fileAttrs[.modificationDate] as? Date {
+            let f = DateFormatter()
+            f.dateStyle = .medium
+            f.timeStyle = .short
+            fileItems.append(ImageMetadataItem(label: "Modified", value: f.string(from: modDate)))
+        }
+        sections.append(ImageMetadataSection(title: "File & Image Specs", icon: "doc.text", items: fileItems))
+
+        // 2. Camera & Equipment
+        let make = (tiff?[kCGImagePropertyTIFFMake] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = (tiff?[kCGImagePropertyTIFFModel] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let software = (tiff?[kCGImagePropertyTIFFSoftware] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lensModel = (exif?[kCGImagePropertyExifLensModel] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lensMake = (exif?[kCGImagePropertyExifLensMake] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var cameraSummary: String? = nil
+        if let model, !model.isEmpty {
+            if let make, !make.isEmpty, !model.lowercased().contains(make.lowercased()) {
+                cameraSummary = "\(make) \(model)"
+            } else {
+                cameraSummary = model
+            }
+        } else if let make, !make.isEmpty {
+            cameraSummary = make
+        }
+
+        var cameraItems: [ImageMetadataItem] = []
+        if let make, !make.isEmpty { cameraItems.append(ImageMetadataItem(label: "Make", value: make)) }
+        if let model, !model.isEmpty { cameraItems.append(ImageMetadataItem(label: "Model", value: model)) }
+        if let lensModel, !lensModel.isEmpty {
+            let fullLens = (lensMake != nil && !lensModel.contains(lensMake!)) ? "\(lensMake!) \(lensModel)" : lensModel
+            cameraItems.append(ImageMetadataItem(label: "Lens", value: fullLens))
+        }
+        if let software, !software.isEmpty { cameraItems.append(ImageMetadataItem(label: "Software", value: software)) }
+        if !cameraItems.isEmpty {
+            sections.append(ImageMetadataSection(title: "Camera & Equipment", icon: "camera", items: cameraItems))
+        }
+
+        // 3. Exposure & Shooting
+        var shutterSpeed: String? = nil
+        var aperture: String? = nil
+        var iso: String? = nil
+        var focalLength: String? = nil
+
+        var shotItems: [ImageMetadataItem] = []
+        if let dateOriginal = exif?[kCGImagePropertyExifDateTimeOriginal] as? String {
+            shotItems.append(ImageMetadataItem(label: "Date Taken", value: dateOriginal))
+        } else if let dateTiff = tiff?[kCGImagePropertyTIFFDateTime] as? String {
+            shotItems.append(ImageMetadataItem(label: "Date", value: dateTiff))
+        }
+
+        if let expTime = (exif?[kCGImagePropertyExifExposureTime] as? NSNumber)?.doubleValue {
+            let str = expTime < 1.0 && expTime > 0 ? "1/\(Int(round(1.0 / expTime)))s" : String(format: "%.1fs", expTime)
+            shutterSpeed = str
+            shotItems.append(ImageMetadataItem(label: "Shutter Speed", value: str))
+        }
+
+        if let fNum = (exif?[kCGImagePropertyExifFNumber] as? NSNumber)?.doubleValue {
+            let str = String(format: "ƒ/%.1f", fNum)
+            aperture = str
+            shotItems.append(ImageMetadataItem(label: "Aperture", value: str))
+        }
+
+        if let isoArr = exif?[kCGImagePropertyExifISOSpeedRatings] as? [Int], let first = isoArr.first {
+            iso = "\(first)"
+            shotItems.append(ImageMetadataItem(label: "ISO", value: "\(first)"))
+        } else if let isoNum = (exif?[kCGImagePropertyExifISOSpeedRatings] as? NSNumber)?.intValue {
+            iso = "\(isoNum)"
+            shotItems.append(ImageMetadataItem(label: "ISO", value: "\(isoNum)"))
+        }
+
+        if let fl = (exif?[kCGImagePropertyExifFocalLength] as? NSNumber)?.doubleValue {
+            var fStr = String(format: "%.1f mm", fl)
+            if let eq35 = (exif?[kCGImagePropertyExifFocalLenIn35mmFilm] as? NSNumber)?.intValue {
+                fStr += " (\(eq35)mm equiv)"
+            }
+            focalLength = String(format: "%.1fmm", fl)
+            shotItems.append(ImageMetadataItem(label: "Focal Length", value: fStr))
+        }
+
+        if let bias = (exif?[kCGImagePropertyExifExposureBiasValue] as? NSNumber)?.doubleValue {
+            shotItems.append(ImageMetadataItem(label: "Exposure Bias", value: String(format: "%+.1f EV", bias)))
+        }
+
+        if let flash = (exif?[kCGImagePropertyExifFlash] as? NSNumber)?.intValue {
+            let fired = (flash & 1) != 0
+            shotItems.append(ImageMetadataItem(label: "Flash", value: fired ? "Fired" : "Did not fire"))
+        }
+
+        if let wb = (exif?[kCGImagePropertyExifWhiteBalance] as? NSNumber)?.intValue {
+            shotItems.append(ImageMetadataItem(label: "White Balance", value: wb == 0 ? "Auto" : "Manual"))
+        }
+
+        if let meter = (exif?[kCGImagePropertyExifMeteringMode] as? NSNumber)?.intValue {
+            let meterName: String
+            switch meter {
+            case 1: meterName = "Average"
+            case 2: meterName = "Center-Weighted Average"
+            case 3: meterName = "Spot"
+            case 4: meterName = "Multi-Spot"
+            case 5: meterName = "Multi-Segment (Pattern)"
+            case 6: meterName = "Partial"
+            default: meterName = "Standard (\(meter))"
+            }
+            shotItems.append(ImageMetadataItem(label: "Metering", value: meterName))
+        }
+
+        if !shotItems.isEmpty {
+            sections.append(ImageMetadataSection(title: "Exposure & Settings", icon: "slider.horizontal.3", items: shotItems))
+        }
+
+        // 4. GPS & Location
+        var gpsCoord: GPSCoordinate? = nil
+        if let gps {
+            var gpsItems: [ImageMetadataItem] = []
+            if let latVal = (gps[kCGImagePropertyGPSLatitude] as? NSNumber)?.doubleValue,
+               let latRef = gps[kCGImagePropertyGPSLatitudeRef] as? String,
+               let lonVal = (gps[kCGImagePropertyGPSLongitude] as? NSNumber)?.doubleValue,
+               let lonRef = gps[kCGImagePropertyGPSLongitudeRef] as? String {
+                let latSigned = latRef.uppercased() == "S" ? -latVal : latVal
+                let lonSigned = lonRef.uppercased() == "W" ? -lonVal : lonVal
+                gpsCoord = GPSCoordinate(lat: latSigned, lon: lonSigned)
+                gpsItems.append(ImageMetadataItem(label: "Latitude", value: String(format: "%.5f° %@", latVal, latRef)))
+                gpsItems.append(ImageMetadataItem(label: "Longitude", value: String(format: "%.5f° %@", lonVal, lonRef)))
+            }
+
+            if let altVal = (gps[kCGImagePropertyGPSAltitude] as? NSNumber)?.doubleValue {
+                let altRef = (gps[kCGImagePropertyGPSAltitudeRef] as? NSNumber)?.intValue ?? 0
+                let altSigned = altRef == 1 ? -altVal : altVal
+                gpsItems.append(ImageMetadataItem(label: "Altitude", value: String(format: "%.1f m (%d ft)", altSigned, Int(altSigned * 3.28084))))
+            }
+
+            if let speed = (gps[kCGImagePropertyGPSSpeed] as? NSNumber)?.doubleValue {
+                let sRef = (gps[kCGImagePropertyGPSSpeedRef] as? String) ?? "K"
+                gpsItems.append(ImageMetadataItem(label: "Speed", value: String(format: "%.1f %@", speed, sRef == "M" ? "mph" : "km/h")))
+            }
+
+            if let dir = (gps[kCGImagePropertyGPSImgDirection] as? NSNumber)?.doubleValue {
+                gpsItems.append(ImageMetadataItem(label: "Heading", value: String(format: "%.0f°", dir)))
+            }
+
+            if !gpsItems.isEmpty {
+                sections.append(ImageMetadataSection(title: "Location (GPS)", icon: "location", items: gpsItems))
+            }
+        }
+
+        // 5. IPTC & Rights
+        if let iptc {
+            var iptcItems: [ImageMetadataItem] = []
+            if let obj = iptc[kCGImagePropertyIPTCObjectName] as? String, !obj.isEmpty {
+                iptcItems.append(ImageMetadataItem(label: "Title", value: obj))
+            }
+            if let author = iptc[kCGImagePropertyIPTCByline] as? String, !author.isEmpty {
+                iptcItems.append(ImageMetadataItem(label: "Creator / Artist", value: author))
+            }
+            if let c = iptc[kCGImagePropertyIPTCCopyrightNotice] as? String, !c.isEmpty {
+                iptcItems.append(ImageMetadataItem(label: "Copyright", value: c))
+            }
+            if let desc = iptc[kCGImagePropertyIPTCCaptionAbstract] as? String, !desc.isEmpty {
+                iptcItems.append(ImageMetadataItem(label: "Caption", value: desc))
+            }
+            if let kw = iptc[kCGImagePropertyIPTCKeywords] as? [String], !kw.isEmpty {
+                iptcItems.append(ImageMetadataItem(label: "Keywords", value: kw.joined(separator: ", ")))
+            } else if let kwStr = iptc[kCGImagePropertyIPTCKeywords] as? String, !kwStr.isEmpty {
+                iptcItems.append(ImageMetadataItem(label: "Keywords", value: kwStr))
+            }
+
+            if !iptcItems.isEmpty {
+                sections.append(ImageMetadataSection(title: "IPTC & Copyright", icon: "person.text.rectangle", items: iptcItems))
+            }
+        }
+
+        let hasEXIFOrGPS = (exif != nil && !exif!.isEmpty) || (gps != nil && !gps!.isEmpty) || (!cameraItems.isEmpty)
+
+        // Summary string
+        var textLines: [String] = ["Metadata for \(url.lastPathComponent):"]
+        for s in sections {
+            textLines.append("\n[\(s.title)]")
+            for item in s.items {
+                textLines.append("  \(item.label): \(item.value)")
+            }
+        }
+
+        return ImageMetadataReport(
+            fileName: url.lastPathComponent,
+            fileSize: fileSizeStr,
+            dimensions: dimStr,
+            megapixels: mpStr,
+            format: ext,
+            colorProfile: profileName,
+            cameraSummary: cameraSummary,
+            exposureSummary: [shutterSpeed, aperture, iso != nil ? "ISO \(iso!)" : nil].compactMap { $0 }.joined(separator: " · "),
+            shutterSpeed: shutterSpeed,
+            aperture: aperture,
+            iso: iso != nil ? "ISO \(iso!)" : nil,
+            focalLength: focalLength,
+            gpsCoordinate: gpsCoord,
+            hasEXIFOrGPS: hasEXIFOrGPS,
+            sections: sections,
+            fullTextSummary: textLines.joined(separator: "\n")
+        )
+    }
+}
+
+public struct MetadataInspectorView: View {
+    public let sourceURL: URL
+    public var onStripComplete: ((URL) -> Void)?
+    public var onClose: () -> Void
+
+    @State private var report: ImageMetadataReport?
+    @State private var thumbnail: NSImage?
+    @State private var copied: Bool = false
+    @State private var isStripping: Bool = false
+    @State private var bannerMessage: String? = nil
+
+    @ObservedObject private var theme = ThemeManager.shared
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            // Header bar
+            ZStack {
+                Text("Metadata Inspector")
+                    .font(.system(size: 14, weight: .bold))
+                HStack {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .frame(width: 24, height: 24)
+                            .background(Circle().fill(Color.black.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                }
+            }
+            .padding(14)
+
+            // File summary card
+            HStack(spacing: 12) {
+                if let thumb = thumbnail {
+                    Image(nsImage: thumb)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 58, height: 58)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.1), lineWidth: 1))
+                } else {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.primary.opacity(0.06))
+                        .frame(width: 58, height: 58)
+                        .overlay(Image(systemName: "photo").foregroundColor(.secondary))
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(sourceURL.lastPathComponent)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    HStack(spacing: 6) {
+                        badge(text: report?.format ?? sourceURL.pathExtension.uppercased(), isAccent: true)
+                        if let dim = report?.dimensions, dim != "Unknown" {
+                            badge(text: dim, isAccent: false)
+                        }
+                        if let mp = report?.megapixels, !mp.isEmpty {
+                            badge(text: mp, isAccent: false)
+                        }
+                        if let size = report?.fileSize {
+                            badge(text: size, isAccent: false)
+                        }
+                    }
+
+                    if let cam = report?.cameraSummary {
+                        HStack(spacing: 4) {
+                            Image(systemName: "camera.fill").font(.system(size: 10))
+                            Text(cam).font(.system(size: 11))
+                        }
+                        .foregroundColor(.secondary)
+                    }
+                }
+                Spacer()
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+
+            // Quick shooting pills (if available)
+            if let report, (report.shutterSpeed != nil || report.aperture != nil || report.iso != nil || report.focalLength != nil) {
+                HStack(spacing: 6) {
+                    if let s = report.shutterSpeed { statPill(icon: "timer", label: "Shutter", val: s) }
+                    if let a = report.aperture { statPill(icon: "camera.aperture", label: "Aperture", val: a) }
+                    if let i = report.iso { statPill(icon: "gauge.with.dots.needle.bottom.50percent", label: "ISO", val: i) }
+                    if let f = report.focalLength { statPill(icon: "arrow.left.and.right", label: "Focal", val: f) }
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            }
+
+            // Banner feedback (if stripped or clean)
+            if let msg = bannerMessage {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                    Text(msg).font(.system(size: 11, weight: .medium))
+                    Spacer()
+                }
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.green.opacity(0.12)))
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            } else if let report, !report.hasEXIFOrGPS {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.shield.fill").foregroundColor(.green)
+                    Text("No EXIF or GPS tags found in file (already clean)").font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.03)))
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            }
+
+            // Scrollable list of sections
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(spacing: 12) {
+                    if let sections = report?.sections {
+                        ForEach(sections) { section in
+                            sectionView(section)
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
+            }
+
+            Divider().opacity(0.4)
+
+            // Action footer
+            HStack(spacing: 10) {
+                Button(action: copyToClipboard) {
+                    HStack(spacing: 5) {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        Text(copied ? "Copied!" : "Copy All Info")
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+
+                if let coord = report?.gpsCoordinate {
+                    Button(action: { openInMaps(lat: coord.lat, lon: coord.lon) }) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "map")
+                            Text("Apple Maps")
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                        .padding(.horizontal, 12).padding(.vertical, 7)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Spacer()
+
+                if report?.hasEXIFOrGPS == true {
+                    Button(action: stripMetadataCopy) {
+                        HStack(spacing: 5) {
+                            if isStripping {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: "shield.slash")
+                            }
+                            Text("Strip & Save Copy")
+                        }
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 14).padding(.vertical, 7)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(theme.accent))
+                        .foregroundColor(theme.currentTheme == .monochrome ? .black : .white)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isStripping)
+                }
+            }
+            .padding(14)
+        }
+        .frame(width: 520, height: 620)
+        .background(LiquidWindowBackground())
+        .onAppear {
+            loadMetadata()
+            loadThumbnail()
+        }
+    }
+
+    @ViewBuilder
+    private func badge(text: String, isAccent: Bool) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .medium, design: .monospaced))
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(RoundedRectangle(cornerRadius: 4).fill(isAccent ? theme.accent.opacity(0.15) : Color.primary.opacity(0.06)))
+            .foregroundColor(isAccent ? theme.accent : .secondary)
+    }
+
+    @ViewBuilder
+    private func statPill(icon: String, label: String, val: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon).font(.system(size: 9)).foregroundColor(theme.accent)
+            Text(val).font(.system(size: 11, weight: .medium, design: .monospaced))
+        }
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
+    }
+
+    @ViewBuilder
+    private func sectionView(_ section: ImageMetadataSection) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: section.icon)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(theme.accent)
+                Text(section.title)
+                    .font(.system(size: 12, weight: .bold))
+                Spacer()
+            }
+
+            VStack(spacing: 4) {
+                ForEach(section.items) { item in
+                    HStack(alignment: .top) {
+                        Text(item.label)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .frame(width: 120, alignment: .leading)
+                        Spacer()
+                        Text(item.value)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.primary)
+                            .multilineTextAlignment(.trailing)
+                            .textSelection(.enabled)
+                    }
+                    if item.id != section.items.last?.id {
+                        Divider().opacity(0.2)
+                    }
+                }
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.035)))
+        }
+    }
+
+    private func loadMetadata() {
+        report = ImageMetadataReport.load(from: sourceURL)
+    }
+
+    private func loadThumbnail() {
+        guard let src = CGImageSourceCreateWithURL(sourceURL as CFURL, nil) else { return }
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: 180
+        ]
+        if let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) {
+            thumbnail = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+        }
+    }
+
+    private func copyToClipboard() {
+        guard let report else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(report.fullTextSummary, forType: .string)
+        withAnimation { copied = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            withAnimation { copied = false }
+        }
+    }
+
+    private func openInMaps(lat: Double, lon: Double) {
+        if let url = URL(string: "https://maps.apple.com/?ll=\(lat),\(lon)&q=\(lat),\(lon)") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func stripMetadataCopy() {
+        isStripping = true
+        do {
+            let outURL = try FileConversionEngine.shared.stripMetadata(at: sourceURL)
+            isStripping = false
+            withAnimation {
+                bannerMessage = "Saved clean copy: \(outURL.lastPathComponent)"
+            }
+            onStripComplete?(outURL)
+        } catch {
+            isStripping = false
+            withAnimation {
+                bannerMessage = "Failed: \(error.localizedDescription)"
+            }
+        }
+    }
+}
+
+// MARK: - 8. Theme & Liquid Glass Settings Window
+
+public struct ThemeSettingsView: View {
+    @ObservedObject var theme = ThemeManager.shared
+    public var onClose: () -> Void
+
+    public init(onClose: @escaping () -> Void) {
+        self.onClose = onClose
+    }
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            ZStack {
+                HStack(spacing: 8) {
+                    Image(systemName: "paintpalette.fill")
+                        .foregroundColor(theme.accent)
+                    Text("Theme & Appearance")
+                        .font(.system(size: 14, weight: .bold))
+                }
+                HStack {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .frame(width: 24, height: 24)
+                            .background(Circle().fill(Color.black.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                }
+            }
+            .padding(14)
+
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 18) {
+                    // 1. Theme Presets Grid
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Select Theme")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(.secondary)
+
+                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                            ForEach(ThemePreset.allCases) { preset in
+                                themeCard(preset)
+                            }
+                        }
+                    }
+
+                    // 2. Liquid Glass Customization Section
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "drop.fill")
+                                .foregroundColor(theme.accent)
+                            Text("Liquid Glass Customization")
+                                .font(.system(size: 13, weight: .bold))
+                            Spacer()
+                            if theme.isLiquidGlass {
+                                Text("ACTIVE")
+                                    .font(.system(size: 9, weight: .heavy, design: .monospaced))
+                                    .padding(.horizontal, 6).padding(.vertical, 2)
+                                    .background(Capsule().fill(theme.accent.opacity(0.18)))
+                                    .foregroundColor(theme.accent)
+                            }
+                        }
+
+                        // Transparency slider
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("Glass Transparency")
+                                    .font(.system(size: 12, weight: .medium))
+                                Spacer()
+                                Text("\(theme.transparencyPercentage)% Transparent")
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(theme.accent)
+                            }
+
+                            Slider(value: $theme.liquidGlassOpacity, in: 0.10...0.85, step: 0.05)
+                                .tint(theme.accent)
+
+                            HStack {
+                                Text("More Translucent").font(.caption2).foregroundColor(.secondary)
+                                Spacer()
+                                Text("More Frosted").font(.caption2).foregroundColor(.secondary)
+                            }
+
+                            // Quick preset pills
+                            HStack(spacing: 8) {
+                                presetOpacityButton(label: "Crystal (80%)", value: 0.20)
+                                presetOpacityButton(label: "Balanced (60%)", value: 0.40)
+                                presetOpacityButton(label: "Frosted (30%)", value: 0.70)
+                            }
+                            .padding(.top, 4)
+                        }
+                        .padding(12)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
+
+                        // Live Interactive Preview Disc
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Live Glass Preview")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.secondary)
+
+                            ZStack {
+                                // Background texture to test transparency
+                                LinearGradient(
+                                    colors: [
+                                        Color(red: 0.96, green: 0.25, blue: 0.34),
+                                        Color(red: 0.99, green: 0.72, blue: 0.14),
+                                        Color(red: 0.20, green: 0.65, blue: 0.98),
+                                        Color(red: 0.52, green: 0.36, blue: 0.85)
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                                .frame(height: 110)
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                                // Floating Liquid Glass Disc
+                                Circle()
+                                    .fill(.ultraThinMaterial.opacity(theme.effectiveGlassOpacity))
+                                    .background(
+                                        Circle().fill(
+                                            LinearGradient(
+                                                colors: [
+                                                    Color.white.opacity(0.3 * (1.0 - theme.effectiveGlassOpacity * 0.7)),
+                                                    Color.cyan.opacity(0.12 * (1.0 - theme.effectiveGlassOpacity * 0.7))
+                                                ],
+                                                startPoint: .topLeading,
+                                                endPoint: .bottomTrailing
+                                            )
+                                        )
+                                    )
+                                    .overlay(
+                                        Circle().strokeBorder(
+                                            LinearGradient(
+                                                colors: [
+                                                    Color.white.opacity(0.9),
+                                                    Color.cyan.opacity(0.6),
+                                                    Color.purple.opacity(0.3),
+                                                    Color.white.opacity(0.7)
+                                                ],
+                                                startPoint: .topLeading,
+                                                endPoint: .bottomTrailing
+                                            ),
+                                            lineWidth: 2
+                                        )
+                                    )
+                                    .frame(width: 84, height: 84)
+                                    .overlay(
+                                        VStack(spacing: 2) {
+                                            Image(systemName: "drop.fill")
+                                                .font(.system(size: 16))
+                                                .foregroundColor(.white)
+                                                .shadow(color: .black.opacity(0.4), radius: 3)
+                                            Text("\(theme.transparencyPercentage)%")
+                                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                                .foregroundColor(.white)
+                                                .shadow(color: .black.opacity(0.4), radius: 3)
+                                        }
+                                    )
+                                    .shadow(color: Color.black.opacity(0.25), radius: 10, x: 0, y: 5)
+                            }
+                        }
+
+                        // macOS System Settings Connection Card
+                        VStack(alignment: .leading, spacing: 8) {
+                            Toggle("Sync with macOS System Settings", isOn: $theme.syncWithSystemSettings)
+                                .font(.system(size: 12, weight: .medium))
+                                .tint(theme.accent)
+
+                            Text("Automatically adjusts when 'Reduce transparency' is toggled in macOS System Settings → Accessibility → Display.")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            HStack(spacing: 6) {
+                                Circle()
+                                    .fill(theme.systemReduceTransparency ? Color.orange : Color.green)
+                                    .frame(width: 8, height: 8)
+                                Text(theme.systemReduceTransparency
+                                     ? "System 'Reduce Transparency' is currently ON"
+                                     : "System 'Reduce Transparency' is currently OFF")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundColor(theme.systemReduceTransparency ? .orange : .secondary)
+
+                                Spacer()
+
+                                Button("Open Display Settings…") {
+                                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.universalaccess?Display") {
+                                        NSWorkspace.shared.open(url)
+                                    }
+                                }
+                                .font(.system(size: 11))
+                                .buttonStyle(.link)
+                            }
+                            .padding(.top, 4)
+                        }
+                        .padding(12)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
+                    }
+                }
+                .padding(16)
+            }
+
+            Divider().opacity(0.3)
+
+            // Footer
+            HStack {
+                Button("Reset Defaults") {
+                    withAnimation {
+                        theme.currentTheme = .tangerine
+                        theme.liquidGlassOpacity = 0.40
+                        theme.syncWithSystemSettings = true
+                    }
+                }
+                .font(.system(size: 12))
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+
+                Spacer()
+
+                Button("Done") {
+                    onClose()
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.horizontal, 16).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 7).fill(theme.accent))
+                .foregroundColor(theme.currentTheme == .monochrome ? .black : .white)
+                .buttonStyle(.plain)
+            }
+            .padding(14)
+        }
+        .frame(width: 500, height: 640)
+        .background(LiquidWindowBackground())
+    }
+
+    @ViewBuilder
+    private func themeCard(_ preset: ThemePreset) -> some View {
+        let isSelected = theme.currentTheme == preset
+        Button {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                theme.currentTheme = preset
+            }
+        } label: {
+            HStack(spacing: 10) {
+                // Swatch Circle
+                ZStack {
+                    Circle()
+                        .fill(LinearGradient(colors: [preset.accentLight, preset.accent], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 28, height: 28)
+                    Image(systemName: preset.systemIcon)
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(preset == .monochrome ? .black : .white)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text(preset.name)
+                            .font(.system(size: 12, weight: isSelected ? .bold : .medium))
+                            .foregroundColor(.primary)
+                        if preset == .liquidGlass {
+                            Text("GLASS")
+                                .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                                .padding(.horizontal, 4).padding(.vertical, 1)
+                                .background(Capsule().fill(Color.cyan.opacity(0.2)))
+                                .foregroundColor(.cyan)
+                        }
+                    }
+                    Text(preset.description)
+                        .font(.system(size: 9.5))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(theme.accent)
+                        .font(.system(size: 14))
+                }
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 10).fill(isSelected ? theme.accent.opacity(0.10) : Color.primary.opacity(0.04)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(isSelected ? theme.accent : Color.clear, lineWidth: 1.5)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func presetOpacityButton(label: String, value: Double) -> some View {
+        let isCurrent = abs(theme.liquidGlassOpacity - value) < 0.03
+        Button {
+            withAnimation {
+                theme.liquidGlassOpacity = value
+            }
+        } label: {
+            Text(label)
+                .font(.system(size: 10, weight: isCurrent ? .bold : .regular))
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 6).fill(isCurrent ? theme.accent : Color.primary.opacity(0.06)))
+                .foregroundColor(isCurrent ? (theme.currentTheme == .monochrome ? .black : .white) : .primary)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - 9. App Coordinator & Floating Wheel Controller
 
 @MainActor
 public final class AppCoordinator: ObservableObject {
@@ -1677,14 +2861,15 @@ public final class AppCoordinator: ObservableObject {
                 }
 
             case .metadata:
-                do {
-                    let outURL = try FileConversionEngine.shared.stripMetadata(at: fileURL)
-                    statusMessage = "Stripped metadata -> \(outURL.lastPathComponent)"
-                    NSWorkspace.shared.activateFileViewerSelecting([outURL])
-                } catch {
-                    statusMessage = error.localizedDescription
-                    showNotification(title: "Strip Metadata", message: error.localizedDescription)
-                }
+                statusMessage = "Inspecting metadata: \(fileURL.lastPathComponent)"
+                openEditor(MetadataInspectorView(
+                    sourceURL: fileURL,
+                    onStripComplete: { [weak self] url in
+                        self?.statusMessage = "Saved clean copy: \(url.lastPathComponent)"
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    },
+                    onClose: { [weak self] in self?.editorWindow?.close() }
+                ), size: CGSize(width: 520, height: 620))
             }
         }
     }
@@ -1716,6 +2901,12 @@ public final class AppCoordinator: ObservableObject {
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         editorWindow = win
+    }
+
+    public func openSettings() {
+        openEditor(ThemeSettingsView(onClose: { [weak self] in
+            self?.editorWindow?.close()
+        }), size: CGSize(width: 500, height: 640))
     }
 }
 
@@ -1765,6 +2956,29 @@ public struct OpenTangerineApp: App {
                 Button("Pick File to Test Tools Wheel…") {
                     coordinator.pickFileAndShowWheel(mode: .tools)
                 }
+                Divider()
+                Menu("Theme: \(ThemeManager.shared.currentTheme.name)") {
+                    ForEach(ThemePreset.allCases) { preset in
+                        Button {
+                            ThemeManager.shared.currentTheme = preset
+                        } label: {
+                            if ThemeManager.shared.currentTheme == preset {
+                                Text("✓ \(preset.name)")
+                            } else {
+                                Text(preset.name)
+                            }
+                        }
+                    }
+                }
+                if ThemeManager.shared.isLiquidGlass {
+                    Text("• Glass: \(ThemeManager.shared.transparencyPercentage)% Transparent")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                Button("Theme & Appearance Settings…") {
+                    coordinator.openSettings()
+                }
+                .keyboardShortcut(",")
                 Divider()
                 Button("Quit OpenTangerine") {
                     NSApplication.shared.terminate(nil)
