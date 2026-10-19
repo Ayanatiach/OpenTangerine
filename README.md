@@ -20,9 +20,19 @@ original file and revealed in Finder.
 |---|---|---|---|
 | **⇧ Shift + Drag** | Files | Convert | PDF → DOCX / JPG / PNG / TXT · Images → PNG / WEBP / HEIC / JPG / AVIF / BMP / PDF / DOCX / TIFF |
 | **⇧ Shift + Drag** | Folders & ZIPs | Folder Actions | **Zip Folder** · **Unzip Archive** · **Folder/Archive Info** (file breakdown, disk size, nesting, permissions) |
-| **⌥⇧ Option + Shift + Drag** | Images | Tools | Crop (aspect presets, pixel dimensions) · Add BG (backdrop, corners, shadow) · Metadata (EXIF/GPS inspector & clean export) · Compress |
+| **⌥⇧ Option + Shift + Drag** | Images | Tools | **Remove BG** (AI Auto-Mask & Point Wand) · **Crop** (4-side & corner resize, aspect locks) · **Add BG** (backdrop, corners, shadow, subject isolation) · **Metadata** (EXIF/GPS inspector & clean export) · **Compress** |
 
-Everything runs **100% offline** using Apple frameworks (PDFKit, ImageIO, CoreGraphics, SwiftUI).
+Everything runs **100% offline** using Apple frameworks (Vision, PDFKit, ImageIO, CoreGraphics, SwiftUI).
+
+### ✂️ Flawless Multi-Side Crop & AI Background Removal (v1.0.5)
+
+- **Flawless Multi-Side Crop**: Interactive 8-handle box resizer (all 4 corners and all 4 edge pills), center drag panning, dimmed mask overlay, rule-of-thirds alignment grid, aspect ratio locking (Free, 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3), and manual pixel dimension inputs.
+- **Background Removal Engine ("REMOVE BG")**:
+  - **AI Auto Masking**: Powered by Apple Vision `VNGenerateForegroundInstanceMaskRequest` and neural person segmentation to isolate subjects with smooth anti-aliased edge contours.
+  - **Point & Autoselect (Magic Wand)**: Click anywhere on the image to flood-select contiguous color regions with edge-aware color distance tolerance.
+  - **Preview Modes & Live Invert**: Inspect on transparent checkerboard grid, Solid Dark, Solid Light, or Solid Green; invert mask with one click and export transparent PNGs with the **Done** button.
+  - **Integrated Subject Isolation in "ADD BG"**: Toggle "Remove photo background" inside the backdrop tool to place clean cutouts on custom gradients and colors.
+- **Linear & Continuous Mac Squircle Bevels**: Harmonized all window corners to continuous 18pt macOS squircles (`RoundedRectangle(cornerRadius: 18, style: .continuous)`) across all themes, eliminating sharp edges.
 
 ### 📁 Folder & Archive Actions (⇧ Shift + Drag)
 
@@ -47,7 +57,7 @@ Keep OpenTangerine up to date directly from the app:
 - Displays markdown release notes and download progress.
 - 1-click in-place update and automatic relaunch.
 
-### ⚡ Memory Leak-Free & Multi-Zone Optimization (v1.0.4)
+### ⚡ Memory Leak-Free & Multi-Zone Optimization
 
 - **Zero Memory Leaks (Confirmed via `/usr/bin/leaks`)**: Completely eliminated delegate retain cycles in background network tasks, event monitors, and window observers.
 - **Multi-Zone Heap Pressure Relief**: Sweeps all Mach VM zones via `malloc_get_all_zones` and `malloc_zone_pressure_relief`, actively returning cached image representations and transient render trees to the kernel.
@@ -58,7 +68,7 @@ Keep OpenTangerine up to date directly from the app:
 ## 📦 Install
 
 ### Option A: Direct Download (Recommended)
-1. Download **[OpenTangerine-1.0.4-macOS.zip](https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.4/OpenTangerine-1.0.4-macOS.zip)** from the [Releases](https://github.com/Ayanatiach/OpenTangerine/releases) page.
+1. Download **[OpenTangerine-1.0.5-macOS.zip](https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.5/OpenTangerine-1.0.5-macOS.zip)** from the [Releases](https://github.com/Ayanatiach/OpenTangerine/releases) page.
 2. Unzip and drag **OpenTangerine.app** into your `/Applications` folder.
 3. Because the app is ad-hoc signed, on first launch **right-click → Open**, then click **Open**.
    *(Or run: `xattr -dr com.apple.quarantine /Applications/OpenTangerine.app` in Terminal)*
@@ -66,7 +76,7 @@ Keep OpenTangerine up to date directly from the app:
 
 ### Option B: One-Line Terminal Install
 ```bash
-curl -fsSL https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.4/OpenTangerine-1.0.4-macOS.zip -o /tmp/OpenTangerine.zip && \
+curl -fsSL https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.5/OpenTangerine-1.0.5-macOS.zip -o /tmp/OpenTangerine.zip && \
 unzip -q -o /tmp/OpenTangerine.zip -d /Applications && \
 xattr -dr com.apple.quarantine /Applications/OpenTangerine.app && \
 open -a /Applications/OpenTangerine.app
@@ -97,7 +107,8 @@ swift run -c release
 OpenTangerine/
 ├── Package.swift                     # SwiftPM manifest (macOS 13+, executable target)
 ├── Sources/OpenTangerine/
-│   └── OpenTangerine.swift           # App: drag monitor, radial wheel, conversion engine, editors
+│   ├── OpenTangerine.swift           # App: drag monitor, radial wheel, conversion engine, editors
+│   └── BackgroundRemoval.swift       # Vision AI & Magic Wand flood fill background removal engine
 ├── Assets/AppIcon.png                # 1024×1024 source icon (converted to .icns at package time)
 └── scripts/package_app.sh            # Builds & bundles OpenTangerine.app
 ```

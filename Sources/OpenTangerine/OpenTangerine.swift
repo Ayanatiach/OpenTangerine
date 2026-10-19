@@ -19,6 +19,7 @@ import CoreImage
 import AVFoundation
 import Combine
 import Darwin
+import Vision
 
 // MARK: - Memory Optimization & Active Cache Pruning
 
@@ -155,15 +156,17 @@ public enum FolderAction: String, Equatable {
 
 public enum ToolKind: String, CaseIterable, Identifiable {
     case crop = "CROP"
+    case removeBG = "REMOVE BG"
+    case addBG = "ADD BG"
     case compress = "COMPRESS"
     case metadata = "METADATA"
-    case addBG = "ADD BG"
 
     public var id: String { rawValue }
 
     public var systemIcon: String {
         switch self {
         case .crop: return "crop"
+        case .removeBG: return "person.and.background.dotted"
         case .compress: return "arrow.down.right.and.arrow.up.left"
         case .metadata: return "info.circle"
         case .addBG: return "photo.artframe"
@@ -173,6 +176,7 @@ public enum ToolKind: String, CaseIterable, Identifiable {
     public var hint: String {
         switch self {
         case .crop: return "Crop & resize"
+        case .removeBG: return "Remove background"
         case .compress: return "Shrink file size"
         case .metadata: return "Inspect EXIF & GPS"
         case .addBG: return "Add a backdrop"
@@ -1504,7 +1508,8 @@ public struct FolderInspectorView: View {
             .padding(14)
         }
         .frame(width: 520, height: 620)
-        .background(LiquidWindowBackground())
+        .background(LiquidWindowBackground(cornerRadius: 18))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .onExitCommand(perform: onClose)
         .onAppear {
             let rawIcon = NSWorkspace.shared.icon(forFile: sourceURL.path)
@@ -1800,16 +1805,19 @@ public enum Theme {
 }
 
 public struct LiquidWindowBackground: View {
+    public var cornerRadius: CGFloat = 18
     @ObservedObject var theme = ThemeManager.shared
 
-    public init() {}
+    public init(cornerRadius: CGFloat = 18) {
+        self.cornerRadius = cornerRadius
+    }
 
     public var body: some View {
         ZStack {
             if theme.isLiquidGlass {
-                Rectangle()
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(.ultraThinMaterial.opacity(theme.effectiveGlassOpacity))
-                Rectangle()
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(
                         LinearGradient(
                             colors: [
@@ -1821,7 +1829,7 @@ public struct LiquidWindowBackground: View {
                             endPoint: .bottomTrailing
                         )
                     )
-                RoundedRectangle(cornerRadius: 14)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .strokeBorder(
                         LinearGradient(
                             colors: [
@@ -1836,8 +1844,21 @@ public struct LiquidWindowBackground: View {
                         lineWidth: 1.2
                     )
             } else {
-                Rectangle()
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(.ultraThinMaterial)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.28),
+                                Color.white.opacity(0.08),
+                                Color.primary.opacity(0.06)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 1.0
+                    )
             }
         }
     }
@@ -2320,7 +2341,7 @@ final class WheelInteractionView: NSView {
 // MARK: - 5. Crop Image Window
 
 public enum CropAspectPreset: String, CaseIterable, Identifiable {
-    case free = "Free", square = "1:1", widescreen = "16:9", vertical = "9:16", standard = "4:3", portrait = "3:4"
+    case free = "Free", square = "1:1", widescreen = "16:9", vertical = "9:16", standard = "4:3", portrait = "3:4", photo32 = "3:2", photo23 = "2:3"
     public var id: String { rawValue }
     public var ratio: CGFloat? {
         switch self {
@@ -2330,6 +2351,8 @@ public enum CropAspectPreset: String, CaseIterable, Identifiable {
         case .vertical: return 9.0 / 16.0
         case .standard: return 4.0 / 3.0
         case .portrait: return 3.0 / 4.0
+        case .photo32: return 3.0 / 2.0
+        case .photo23: return 2.0 / 3.0
         }
     }
 }
@@ -2345,12 +2368,26 @@ public struct CropEditorView: View {
     @State private var selectedPreset: CropAspectPreset = .free
     @State private var widthInput = "2550"
     @State private var heightInput = "3300"
+    @State private var dragStartRect: CGRect? = nil
     @ObservedObject private var theme = ThemeManager.shared
+
+    private enum DragHandle {
+        case move
+        case topLeft, top, topRight
+        case left, right
+        case bottomLeft, bottom, bottomRight
+    }
 
     public var body: some View {
         VStack(spacing: 0) {
+            // Window Header
             ZStack {
-                Text("Crop Image").font(.system(size: 14, weight: .bold))
+                HStack(spacing: 6) {
+                    Image(systemName: "crop")
+                        .foregroundColor(theme.accent)
+                    Text("Crop Image")
+                        .font(.system(size: 14, weight: .bold))
+                }
                 HStack {
                     Button(action: onClose) {
                         Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
@@ -2363,6 +2400,7 @@ public struct CropEditorView: View {
             .padding(14)
             .background(WindowDragHandle())
 
+            // Canvas & Crop Overlay
             GeometryReader { geo in
                 if let img = nsImage {
                     let scale = min((geo.size.width - 40) / max(naturalPixelSize.width, 1),
@@ -2378,81 +2416,224 @@ public struct CropEditorView: View {
                     )
 
                     ZStack {
+                        // Base Image
                         Image(nsImage: img)
                             .resizable()
+                            .interpolation(.high)
                             .frame(width: w, height: h)
                             .position(x: frame.midX, y: frame.midY)
 
+                        // Dimmed overlay outside crop bounds (4 surrounding rectangles)
+                        Group {
+                            // Top dimmed rect
+                            Rectangle().fill(Color.black.opacity(0.52))
+                                .frame(width: frame.width, height: max(0, cropRect.minY - frame.minY))
+                                .position(x: frame.midX, y: frame.minY + max(0, cropRect.minY - frame.minY) / 2)
+                            // Bottom dimmed rect
+                            Rectangle().fill(Color.black.opacity(0.52))
+                                .frame(width: frame.width, height: max(0, frame.maxY - cropRect.maxY))
+                                .position(x: frame.midX, y: cropRect.maxY + max(0, frame.maxY - cropRect.maxY) / 2)
+                            // Left dimmed rect
+                            Rectangle().fill(Color.black.opacity(0.52))
+                                .frame(width: max(0, cropRect.minX - frame.minX), height: cropRect.height)
+                                .position(x: frame.minX + max(0, cropRect.minX - frame.minX) / 2, y: cropRect.midY)
+                            // Right dimmed rect
+                            Rectangle().fill(Color.black.opacity(0.52))
+                                .frame(width: max(0, frame.maxX - cropRect.maxX), height: cropRect.height)
+                                .position(x: cropRect.maxX + max(0, frame.maxX - cropRect.maxX) / 2, y: cropRect.midY)
+                        }
+
+                        // Rule of Thirds Grid Lines inside crop box
+                        Path { path in
+                            let cw = cropRect.width
+                            let ch = cropRect.height
+                            // Vertical grid lines
+                            path.move(to: CGPoint(x: cropRect.minX + cw / 3, y: cropRect.minY))
+                            path.addLine(to: CGPoint(x: cropRect.minX + cw / 3, y: cropRect.maxY))
+                            path.move(to: CGPoint(x: cropRect.minX + 2 * cw / 3, y: cropRect.minY))
+                            path.addLine(to: CGPoint(x: cropRect.minX + 2 * cw / 3, y: cropRect.maxY))
+                            // Horizontal grid lines
+                            path.move(to: CGPoint(x: cropRect.minX, y: cropRect.minY + ch / 3))
+                            path.addLine(to: CGPoint(x: cropRect.maxX, y: cropRect.minY + ch / 3))
+                            path.move(to: CGPoint(x: cropRect.minX, y: cropRect.minY + 2 * ch / 3))
+                            path.addLine(to: CGPoint(x: cropRect.maxX, y: cropRect.minY + 2 * ch / 3))
+                        }
+                        .stroke(Color.white.opacity(0.38), lineWidth: 0.8)
+
+                        // Crop Boundary Stroke
                         Rectangle()
-                            .stroke(theme.accent, lineWidth: 2)
+                            .stroke(Color.white.opacity(0.95), lineWidth: 1.5)
+                            .shadow(color: .black.opacity(0.4), radius: 1)
                             .frame(width: cropRect.width, height: cropRect.height)
                             .position(x: cropRect.midX, y: cropRect.midY)
 
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(theme.accent)
-                            .frame(width: 26, height: 8)
+                        // Interior Draggable Pan Area
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .frame(width: max(0, cropRect.width - 24), height: max(0, cropRect.height - 24))
+                            .position(x: cropRect.midX, y: cropRect.midY)
+                            .gesture(
+                                DragGesture(minimumDistance: 1)
+                                    .onChanged { val in
+                                        handleDrag(handle: .move, translation: val.translation, frame: frame)
+                                    }
+                                    .onEnded { _ in
+                                        dragStartRect = nil
+                                        syncDimensions()
+                                    }
+                            )
+
+                        // 4 Edge Midpoint Handles
+                        // Top Handle
+                        edgeHandleView(width: 24, height: 7)
+                            .position(x: cropRect.midX, y: cropRect.minY)
+                            .gesture(
+                                DragGesture(minimumDistance: 1)
+                                    .onChanged { val in handleDrag(handle: .top, translation: val.translation, frame: frame) }
+                                    .onEnded { _ in dragStartRect = nil; syncDimensions() }
+                            )
+
+                        // Bottom Handle
+                        edgeHandleView(width: 24, height: 7)
                             .position(x: cropRect.midX, y: cropRect.maxY)
                             .gesture(
-                                DragGesture().onChanged { val in
-                                    let clampedY = min(max(val.location.y, cropRect.minY + 24), frame.maxY)
-                                    normalizedCrop.size.height = (clampedY - cropRect.minY) / frame.height
-                                    selectedPreset = .free
-                                    syncDimensions()
-                                }
+                                DragGesture(minimumDistance: 1)
+                                    .onChanged { val in handleDrag(handle: .bottom, translation: val.translation, frame: frame) }
+                                    .onEnded { _ in dragStartRect = nil; syncDimensions() }
+                            )
+
+                        // Left Handle
+                        edgeHandleView(width: 7, height: 24)
+                            .position(x: cropRect.minX, y: cropRect.midY)
+                            .gesture(
+                                DragGesture(minimumDistance: 1)
+                                    .onChanged { val in handleDrag(handle: .left, translation: val.translation, frame: frame) }
+                                    .onEnded { _ in dragStartRect = nil; syncDimensions() }
+                            )
+
+                        // Right Handle
+                        edgeHandleView(width: 7, height: 24)
+                            .position(x: cropRect.maxX, y: cropRect.midY)
+                            .gesture(
+                                DragGesture(minimumDistance: 1)
+                                    .onChanged { val in handleDrag(handle: .right, translation: val.translation, frame: frame) }
+                                    .onEnded { _ in dragStartRect = nil; syncDimensions() }
+                            )
+
+                        // 4 Corner Handles
+                        // Top-Left Corner
+                        cornerHandleView()
+                            .position(x: cropRect.minX, y: cropRect.minY)
+                            .gesture(
+                                DragGesture(minimumDistance: 1)
+                                    .onChanged { val in handleDrag(handle: .topLeft, translation: val.translation, frame: frame) }
+                                    .onEnded { _ in dragStartRect = nil; syncDimensions() }
+                            )
+
+                        // Top-Right Corner
+                        cornerHandleView()
+                            .position(x: cropRect.maxX, y: cropRect.minY)
+                            .gesture(
+                                DragGesture(minimumDistance: 1)
+                                    .onChanged { val in handleDrag(handle: .topRight, translation: val.translation, frame: frame) }
+                                    .onEnded { _ in dragStartRect = nil; syncDimensions() }
+                            )
+
+                        // Bottom-Left Corner
+                        cornerHandleView()
+                            .position(x: cropRect.minX, y: cropRect.maxY)
+                            .gesture(
+                                DragGesture(minimumDistance: 1)
+                                    .onChanged { val in handleDrag(handle: .bottomLeft, translation: val.translation, frame: frame) }
+                                    .onEnded { _ in dragStartRect = nil; syncDimensions() }
+                            )
+
+                        // Bottom-Right Corner
+                        cornerHandleView()
+                            .position(x: cropRect.maxX, y: cropRect.maxY)
+                            .gesture(
+                                DragGesture(minimumDistance: 1)
+                                    .onChanged { val in handleDrag(handle: .bottomRight, translation: val.translation, frame: frame) }
+                                    .onEnded { _ in dragStartRect = nil; syncDimensions() }
                             )
                     }
                 }
             }
-            .frame(height: 390)
+            .frame(height: 380)
 
+            // Bottom Control Strip
             VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("Aspect ratio").font(.system(size: 12)).foregroundColor(.secondary)
+                // Aspect Ratio Presets
+                HStack(spacing: 6) {
+                    Text("Aspect ratio")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
                     Spacer()
                     ForEach(CropAspectPreset.allCases) { preset in
                         Button(preset.rawValue) {
-                            selectedPreset = preset
-                            if let r = preset.ratio {
-                                let imgRatio = naturalPixelSize.width / max(naturalPixelSize.height, 1)
-                                let normH = min(1.0, (1.0 * imgRatio) / r)
-                                normalizedCrop = CGRect(x: 0, y: (1.0 - normH) / 2, width: 1.0, height: normH)
-                                syncDimensions()
-                            }
+                            selectAspectPreset(preset)
                         }
                         .buttonStyle(.plain)
-                        .padding(.horizontal, 10).padding(.vertical, 4)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(selectedPreset == preset ? theme.accent : Color.clear))
+                        .font(.system(size: 11, weight: selectedPreset == preset ? .semibold : .regular))
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(selectedPreset == preset ? theme.accent : Color.primary.opacity(0.04))
+                        )
                         .foregroundColor(selectedPreset == preset ? (theme.currentTheme == .monochrome ? .black : .white) : .primary)
                     }
                 }
 
-                HStack(spacing: 10) {
-                    Text("W").font(.caption)
-                    TextField("W", text: $widthInput).textFieldStyle(.roundedBorder).frame(width: 72)
-                    Text("H").font(.caption)
-                    TextField("H", text: $heightInput).textFieldStyle(.roundedBorder).frame(width: 72)
+                // Pixel Dimensions
+                HStack(spacing: 8) {
+                    Text("W").font(.caption).foregroundColor(.secondary)
+                    TextField("W", text: $widthInput)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 72)
+                        .onSubmit { applyManualPixelDimensions() }
+
+                    Text("H").font(.caption).foregroundColor(.secondary)
+                    TextField("H", text: $heightInput)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 72)
+                        .onSubmit { applyManualPixelDimensions() }
+
                     Text("px").font(.caption).foregroundColor(.secondary)
+
                     Spacer()
+
+                    Text("\(Int(round(normalizedCrop.width * 100)))% × \(Int(round(normalizedCrop.height * 100)))%")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
                 }
 
+                Divider()
+
+                // Actions: Reset & Apply
                 HStack {
                     Button("Reset") {
                         normalizedCrop = CGRect(x: 0, y: 0, width: 1, height: 1)
                         selectedPreset = .free
                         syncDimensions()
                     }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12))
+
                     Spacer()
+
                     Button("Apply") { applyCrop() }
                         .buttonStyle(.plain)
-                        .padding(.horizontal, 18).padding(.vertical, 7)
+                        .font(.system(size: 13, weight: .bold))
+                        .padding(.horizontal, 22).padding(.vertical, 7)
                         .background(RoundedRectangle(cornerRadius: 8).fill(theme.accent))
                         .foregroundColor(theme.currentTheme == .monochrome ? .black : .white)
                 }
             }
             .padding(18)
         }
-        .frame(width: 480, height: 580)
-        .background(LiquidWindowBackground())
+        .frame(width: 520, height: 620)
+        .background(LiquidWindowBackground(cornerRadius: 18))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .onExitCommand(perform: onClose)
         .onAppear {
             loadPreviewImage()
@@ -2461,6 +2642,147 @@ public struct CropEditorView: View {
             nsImage = nil
             MemoryOptimizer.reclaimMemory()
         }
+    }
+
+    // MARK: - Handle Views
+
+    @ViewBuilder
+    private func cornerHandleView() -> some View {
+        ZStack {
+            Color.clear.frame(width: 32, height: 32).contentShape(Rectangle())
+            Circle()
+                .fill(Color.white)
+                .frame(width: 13, height: 13)
+                .overlay(Circle().stroke(theme.accent, lineWidth: 2))
+                .shadow(color: .black.opacity(0.35), radius: 2, x: 0, y: 1)
+        }
+    }
+
+    @ViewBuilder
+    private func edgeHandleView(width: CGFloat, height: CGFloat) -> some View {
+        ZStack {
+            Color.clear.frame(width: 32, height: 32).contentShape(Rectangle())
+            Capsule()
+                .fill(Color.white)
+                .frame(width: width, height: height)
+                .overlay(Capsule().stroke(theme.accent, lineWidth: 1.5))
+                .shadow(color: .black.opacity(0.35), radius: 2, x: 0, y: 1)
+        }
+    }
+
+    // MARK: - Drag Handling
+
+    private func handleDrag(handle: DragHandle, translation: CGSize, frame: CGRect) {
+        if dragStartRect == nil {
+            dragStartRect = normalizedCrop
+        }
+        guard let start = dragStartRect, frame.width > 0, frame.height > 0 else { return }
+
+        let dx = translation.width / frame.width
+        let dy = translation.height / frame.height
+
+        let minNormW = max(24.0 / frame.width, 0.02)
+        let minNormH = max(24.0 / frame.height, 0.02)
+
+        switch handle {
+        case .move:
+            let newX = min(max(0, start.minX + dx), 1.0 - start.width)
+            let newY = min(max(0, start.minY + dy), 1.0 - start.height)
+            normalizedCrop = CGRect(x: newX, y: newY, width: start.width, height: start.height)
+
+        case .topLeft:
+            var newMinX = max(0, min(start.maxX - minNormW, start.minX + dx))
+            var newMinY = max(0, min(start.maxY - minNormH, start.minY + dy))
+            if selectedPreset != .free, let r = selectedPreset.ratio {
+                let normAspect = r * (naturalPixelSize.height / max(naturalPixelSize.width, 1))
+                let targetW = (start.maxY - newMinY) * normAspect
+                newMinX = max(0, start.maxX - targetW)
+                newMinY = max(0, start.maxY - (start.maxX - newMinX) / normAspect)
+            }
+            normalizedCrop = CGRect(x: newMinX, y: newMinY, width: start.maxX - newMinX, height: start.maxY - newMinY)
+
+        case .topRight:
+            var newMaxX = min(1.0, max(start.minX + minNormW, start.maxX + dx))
+            var newMinY = max(0, min(start.maxY - minNormH, start.minY + dy))
+            if selectedPreset != .free, let r = selectedPreset.ratio {
+                let normAspect = r * (naturalPixelSize.height / max(naturalPixelSize.width, 1))
+                let targetW = (start.maxY - newMinY) * normAspect
+                newMaxX = min(1.0, start.minX + targetW)
+                newMinY = max(0, start.maxY - (newMaxX - start.minX) / normAspect)
+            }
+            normalizedCrop = CGRect(x: start.minX, y: newMinY, width: newMaxX - start.minX, height: start.maxY - newMinY)
+
+        case .bottomLeft:
+            var newMinX = max(0, min(start.maxX - minNormW, start.minX + dx))
+            var newMaxY = min(1.0, max(start.minY + minNormH, start.maxY + dy))
+            if selectedPreset != .free, let r = selectedPreset.ratio {
+                let normAspect = r * (naturalPixelSize.height / max(naturalPixelSize.width, 1))
+                let targetW = (newMaxY - start.minY) * normAspect
+                newMinX = max(0, start.maxX - targetW)
+                newMaxY = min(1.0, start.minY + (start.maxX - newMinX) / normAspect)
+            }
+            normalizedCrop = CGRect(x: newMinX, y: start.minY, width: start.maxX - newMinX, height: newMaxY - start.minY)
+
+        case .bottomRight:
+            var newMaxX = min(1.0, max(start.minX + minNormW, start.maxX + dx))
+            var newMaxY = min(1.0, max(start.minY + minNormH, start.maxY + dy))
+            if selectedPreset != .free, let r = selectedPreset.ratio {
+                let normAspect = r * (naturalPixelSize.height / max(naturalPixelSize.width, 1))
+                let targetW = (newMaxY - start.minY) * normAspect
+                newMaxX = min(1.0, start.minX + targetW)
+                newMaxY = min(1.0, start.minY + (newMaxX - start.minX) / normAspect)
+            }
+            normalizedCrop = CGRect(x: start.minX, y: start.minY, width: newMaxX - start.minX, height: newMaxY - start.minY)
+
+        case .top:
+            selectedPreset = .free
+            let newMinY = max(0, min(start.maxY - minNormH, start.minY + dy))
+            normalizedCrop = CGRect(x: start.minX, y: newMinY, width: start.width, height: start.maxY - newMinY)
+
+        case .bottom:
+            selectedPreset = .free
+            let newMaxY = min(1.0, max(start.minY + minNormH, start.maxY + dy))
+            normalizedCrop = CGRect(x: start.minX, y: start.minY, width: start.width, height: newMaxY - start.minY)
+
+        case .left:
+            selectedPreset = .free
+            let newMinX = max(0, min(start.maxX - minNormW, start.minX + dx))
+            normalizedCrop = CGRect(x: newMinX, y: start.minY, width: start.maxX - newMinX, height: start.height)
+
+        case .right:
+            selectedPreset = .free
+            let newMaxX = min(1.0, max(start.minX + minNormW, start.maxX + dx))
+            normalizedCrop = CGRect(x: start.minX, y: start.minY, width: newMaxX - start.minX, height: start.height)
+        }
+
+        syncDimensions()
+    }
+
+    private func selectAspectPreset(_ preset: CropAspectPreset) {
+        selectedPreset = preset
+        guard let r = preset.ratio else { return }
+        let imgRatio = naturalPixelSize.width / max(naturalPixelSize.height, 1)
+        if r >= imgRatio {
+            let normH = min(1.0, imgRatio / r)
+            normalizedCrop = CGRect(x: 0, y: (1.0 - normH) / 2, width: 1.0, height: normH)
+        } else {
+            let normW = min(1.0, r / imgRatio)
+            normalizedCrop = CGRect(x: (1.0 - normW) / 2, y: 0, width: normW, height: 1.0)
+        }
+        syncDimensions()
+    }
+
+    private func applyManualPixelDimensions() {
+        guard let w = Double(widthInput), let h = Double(heightInput),
+              w > 0, h > 0, naturalPixelSize.width > 0, naturalPixelSize.height > 0 else { return }
+        let normW = min(1.0, CGFloat(w) / naturalPixelSize.width)
+        let normH = min(1.0, CGFloat(h) / naturalPixelSize.height)
+        var newX = normalizedCrop.origin.x
+        var newY = normalizedCrop.origin.y
+        if newX + normW > 1.0 { newX = max(0, 1.0 - normW) }
+        if newY + normH > 1.0 { newY = max(0, 1.0 - normH) }
+        normalizedCrop = CGRect(x: newX, y: newY, width: normW, height: normH)
+        selectedPreset = .free
     }
 
     private func loadPreviewImage() {
@@ -2492,13 +2814,24 @@ public struct CropEditorView: View {
 
     private func applyCrop() {
         autoreleasepool {
-            guard let src = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
-                  let cg = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCache: false] as CFDictionary) else { return }
+            guard let src = CGImageSourceCreateWithURL(sourceURL as CFURL, nil) else { return }
+            let maxDim = max(naturalPixelSize.width, naturalPixelSize.height)
+            let opts: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxDim,
+                kCGImageSourceShouldCache: false
+            ]
+            guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) ??
+                           CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCache: false] as CFDictionary) else { return }
+
+            let cgW = CGFloat(cg.width)
+            let cgH = CGFloat(cg.height)
             let rect = CGRect(
-                x: round(normalizedCrop.minX * CGFloat(cg.width)),
-                y: round(normalizedCrop.minY * CGFloat(cg.height)),
-                width: round(normalizedCrop.width * CGFloat(cg.width)),
-                height: round(normalizedCrop.height * CGFloat(cg.height))
+                x: max(0, min(cgW, round(normalizedCrop.minX * cgW))),
+                y: max(0, min(cgH, round(normalizedCrop.minY * cgH))),
+                width: max(1, min(cgW, round(normalizedCrop.width * cgW))),
+                height: max(1, min(cgH, round(normalizedCrop.height * cgH)))
             )
             guard let cropped = cg.cropping(to: rect) else { return }
             let ext = sourceURL.pathExtension.isEmpty ? "jpg" : sourceURL.pathExtension
@@ -2524,6 +2857,9 @@ public struct BackgroundEditorView: View {
     public var onClose: () -> Void
 
     @State private var nsImage: NSImage?
+    @State private var cutoutNSImage: NSImage?
+    @State private var isolateSubject: Bool = false
+    @State private var isIsolatingSubject: Bool = false
     @State private var paddingPx: Double = 160
     @State private var cornersPx: Double = 24
     @State private var shadowPx: Double = 24
@@ -2573,6 +2909,27 @@ public struct BackgroundEditorView: View {
                     }
                 }
 
+                // Isolate Subject Toggle
+                HStack {
+                    Text("Subject").font(.system(size: 12)).foregroundColor(.secondary).frame(width: 76, alignment: .leading)
+                    Toggle(isOn: $isolateSubject) {
+                        HStack(spacing: 6) {
+                            Text(isIsolatingSubject ? "Isolating subject…" : "Remove photo background")
+                                .font(.system(size: 12))
+                            if isIsolatingSubject {
+                                ProgressView().scaleEffect(0.6)
+                            }
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+                    .tint(theme.accent)
+                    .onChange(of: isolateSubject) { enabled in
+                        if enabled && cutoutNSImage == nil {
+                            isolateSubjectInBackground()
+                        }
+                    }
+                }
+
                 sliderRow("Padding", value: $paddingPx, range: 0...800)
                 sliderRow("Corners", value: $cornersPx, range: 0...240)
                 sliderRow("Shadow", value: $shadowPx, range: 0...100)
@@ -2591,7 +2948,7 @@ public struct BackgroundEditorView: View {
 
                 HStack {
                     Button("Reset") {
-                        paddingPx = 160; cornersPx = 24; shadowPx = 24
+                        paddingPx = 160; cornersPx = 24; shadowPx = 24; isolateSubject = false
                     }
                     Spacer()
                     Button("Save with Background") { saveComposite() }
@@ -2603,14 +2960,16 @@ public struct BackgroundEditorView: View {
             }
             .padding(20)
         }
-        .frame(width: 490, height: 610)
-        .background(LiquidWindowBackground())
+        .frame(width: 490, height: 630)
+        .background(LiquidWindowBackground(cornerRadius: 18))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .onExitCommand(perform: onClose)
         .onAppear {
             loadPreviewImage()
         }
         .onDisappear {
             nsImage = nil
+            cutoutNSImage = nil
             MemoryOptimizer.reclaimMemory()
         }
     }
@@ -2629,6 +2988,30 @@ public struct BackgroundEditorView: View {
         }
     }
 
+    private func isolateSubjectInBackground() {
+        guard let src = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceThumbnailMaxPixelSize: 1000,
+                  kCGImageSourceShouldCache: false
+              ] as CFDictionary) else { return }
+
+        isIsolatingSubject = true
+        Task {
+            if let cutout = try? await BackgroundRemovalEngine.shared.removeBackgroundAI(from: cg) {
+                await MainActor.run {
+                    self.cutoutNSImage = NSImage(cgImage: cutout, size: NSSize(width: cutout.width, height: cutout.height))
+                    self.isIsolatingSubject = false
+                }
+            } else {
+                await MainActor.run {
+                    self.isIsolatingSubject = false
+                }
+            }
+        }
+    }
+
     @ViewBuilder
     private func sliderRow(_ label: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
         HStack {
@@ -2644,7 +3027,8 @@ public struct BackgroundEditorView: View {
     private func canvasView(size: CGSize) -> some View {
         ZStack {
             LinearGradient(colors: gradients[selectedPresetIndex], startPoint: .topLeading, endPoint: .bottomTrailing)
-            if let img = nsImage {
+            let imgToDisplay = isolateSubject ? (cutoutNSImage ?? nsImage) : nsImage
+            if let img = imgToDisplay {
                 Image(nsImage: img)
                     .resizable()
                     .scaledToFit()
@@ -3182,7 +3566,8 @@ public struct MetadataInspectorView: View {
             .padding(14)
         }
         .frame(width: 520, height: 620)
-        .background(LiquidWindowBackground())
+        .background(LiquidWindowBackground(cornerRadius: 18))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .onExitCommand(perform: onClose)
         .onAppear {
             loadMetadata()
@@ -3571,7 +3956,8 @@ public struct ThemeSettingsView: View {
             .padding(.bottom, 12)
         }
         .frame(width: 500, height: 680)
-        .background(LiquidWindowBackground())
+        .background(LiquidWindowBackground(cornerRadius: 18))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .onExitCommand(perform: onClose)
         .onDisappear {
             MemoryOptimizer.reclaimMemory()
@@ -3710,7 +4096,7 @@ public final class AppUpdateService: ObservableObject {
         if let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, !v.isEmpty {
             return v
         }
-        return "1.0.4"
+        return "1.0.5"
     }
 
     @Published public var state: UpdateState = .idle
@@ -3970,7 +4356,8 @@ public struct UpdateView: View {
             .padding(16)
         }
         .frame(width: 480, height: 430)
-        .background(LiquidWindowBackground())
+        .background(LiquidWindowBackground(cornerRadius: 18))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .onExitCommand(perform: onClose)
         .onDisappear {
             updater.latestRelease = nil
@@ -4463,7 +4850,18 @@ public final class AppCoordinator: ObservableObject {
                         NSWorkspace.shared.activateFileViewerSelecting([url])
                     },
                     onClose: { [weak self] in self?.closeEditor() }
-                ), size: CGSize(width: 480, height: 580))
+                ), size: CGSize(width: 520, height: 620))
+
+            case .removeBG:
+                openEditor(BackgroundRemovalEditorView(
+                    sourceURL: fileURL,
+                    onComplete: { [weak self] url in
+                        self?.closeEditor()
+                        self?.statusMessage = "Removed background: \(url.lastPathComponent)"
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    },
+                    onClose: { [weak self] in self?.closeEditor() }
+                ), size: CGSize(width: 540, height: 660))
 
             case .addBG:
                 openEditor(BackgroundEditorView(
@@ -4614,8 +5012,16 @@ public final class AppCoordinator: ObservableObject {
         win.standardWindowButton(.miniaturizeButton)?.isHidden = true
         win.standardWindowButton(.zoomButton)?.isHidden = true
 
-        let hostingView = NSHostingView(rootView: view)
+        let hostingView = NSHostingView(
+            rootView: view
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        )
+        hostingView.wantsLayer = true
+        hostingView.layer?.cornerRadius = 18
+        hostingView.layer?.cornerCurve = .continuous
+        hostingView.layer?.masksToBounds = true
         win.contentView = hostingView
+        win.invalidateShadow()
 
         let delegate = EditorWindowDelegate()
         delegate.onClose = { [weak self] in
@@ -4723,6 +5129,14 @@ public struct OpenTangerineApp: App {
             RunLoop.current.run(until: Date().addingTimeInterval(0.35))
             print(String(format: "[MemTest] After close Crop: %.2f MB", MemoryOptimizer.currentFootprintMB))
 
+            coord.execute(.openTool(.removeBG), for: testImgURL)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            print(String(format: "[MemTest] After open Remove BG: %.2f MB", MemoryOptimizer.currentFootprintMB))
+
+            coord.closeEditor()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+            print(String(format: "[MemTest] After close Remove BG: %.2f MB", MemoryOptimizer.currentFootprintMB))
+
             coord.execute(.openTool(.addBG), for: testImgURL)
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
             print(String(format: "[MemTest] After open Backdrop: %.2f MB", MemoryOptimizer.currentFootprintMB))
@@ -4796,12 +5210,24 @@ public struct OpenTangerineApp: App {
             assert(!report.format.isEmpty)
             print("  ✓ ImageMetadataReport extraction: OK (\(report.dimensions), \(report.format))")
 
-            coord.execute(.openTool(.metadata), for: testImgURL)
+            coord.execute(.openTool(.crop), for: testImgURL)
             coord.closeEditor()
-            coord.execute(.openTool(.metadata), for: testImgURL)
-            coord.openSettings()
+            coord.execute(.openTool(.removeBG), for: testImgURL)
             coord.closeEditor()
-            print("  ✓ Metadata inspector open/close/switch: OK")
+            print("  ✓ Metadata, Crop & Remove BG inspectors open/close/switch: OK")
+
+            if let src = CGImageSourceCreateWithURL(testImgURL as CFURL, nil),
+               let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) {
+                let cutout = BackgroundRemovalEngine.shared.removeBackgroundAtPoints(
+                    from: cg,
+                    points: [CGPoint(x: 0.1, y: 0.1)],
+                    tolerance: 0.2,
+                    action: .remove,
+                    invert: false
+                )
+                assert(cutout.width == cg.width && cutout.height == cg.height)
+                print("  ✓ BackgroundRemovalEngine Point & Autoselect: OK")
+            }
 
             // Folder & Archive tests
             let testFolder = tempDir.appendingPathComponent("ot_test_folder_\(UUID().uuidString.prefix(6))", isDirectory: true)

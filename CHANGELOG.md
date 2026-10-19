@@ -4,6 +4,33 @@ All notable changes to OpenTangerine will be documented in this file.
 
 ---
 
+## [1.0.5] - 2026-10-19
+
+### 🚀 Highlights
+- **Flawless Multi-Side & Corner Crop Editor**:
+  - Full interactive resizing from all 4 sides (Top, Bottom, Left, Right) and all 4 corners (Top-Left, Top-Right, Bottom-Left, Bottom-Right).
+  - Interior drag to pan the selection rectangle smoothly within image boundaries.
+  - Compositional Photography **Rule-of-Thirds (3×3)** grid lines inside the active crop frame.
+  - Edge-to-edge dark dimmed mask overlay outside the selection rectangle for crystal-clear framing.
+  - Aspect ratio presets: Free, 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3 with aspect locking on corner adjustments and smooth unlocking on edge adjustments.
+  - Interactive manual width and height (`W` and `H`) pixel text fields with live synchronization and pixel-perfect cropping.
+- **Background Removal Engine & Interactive Editor ("REMOVE BG")**:
+  - Added dedicated **REMOVE BG** tool to the radial tools wheel with `person.and.background.dotted` symbol.
+  - **AI Auto Masking**: 1-click automatic foreground subject isolation using Apple Vision instance/person segmentation with intelligent border-color fallback for non-photos, logos, and graphics.
+  - **Point & Autoselect (Magic Wand)**: Click anywhere on the image canvas to autoselect connected background or foreground regions using an edge-aware flood fill algorithm.
+  - Dynamic **Tolerance Slider** (5% - 70%) with live visual recalculation.
+  - Mode toggle: "Remove Area" vs "Keep Area", plus "Invert Mask" and "Clear Points".
+  - Preview Modes: Cutout (Transparent Checkerboard), Ruby Mask Tint (Quick Mask glow), White, and Black.
+  - Prominent **Done** button that exports studio-quality transparent PNGs and reveals them in Finder.
+- **Subject Isolation in Backdrop Editor ("ADD BG")**:
+  - Integrated "Remove Photo Background" toggle directly into the backdrop editor to isolate subjects before placing them onto colorful gradient backdrops.
+- **Linear & Continuous Mac Squircle Bevels**:
+  - Harmonized all window corners to continuous 18pt macOS squircles (`RoundedRectangle(cornerRadius: 18, style: .continuous)`) across all themes and views.
+  - Eliminated sharp edges on modal windows, theme settings, updates, and metadata inspector.
+  - Configured AppKit `NSHostingView` layer properties (`cornerCurve = .continuous`, `masksToBounds = true`) and window shadow invalidation for perfect system drop shadows.
+
+---
+
 ## [1.0.4] - 2026-10-19
 
 ### 🚀 Highlights
