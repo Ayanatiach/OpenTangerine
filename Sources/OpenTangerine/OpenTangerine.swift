@@ -41,21 +41,31 @@ public enum MemoryOptimizer {
     public static func reclaimMemory() {
         autoreleasepool {
             URLCache.shared.removeAllCachedResponses()
-            if let pz = malloc_default_purgeable_zone() {
-                _ = malloc_zone_pressure_relief(pz, 0)
-            }
-            _ = malloc_zone_pressure_relief(nil, 0)
+            relieveAllZones()
         }
 
         // Run second pass after the runloop completes the current turn and drains autorelease pools
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             autoreleasepool {
-                if let pz = malloc_default_purgeable_zone() {
-                    _ = malloc_zone_pressure_relief(pz, 0)
-                }
-                _ = malloc_zone_pressure_relief(nil, 0)
+                relieveAllZones()
             }
         }
+    }
+
+    private static func relieveAllZones() {
+        var count: UInt32 = 0
+        var zoneList: UnsafeMutablePointer<vm_address_t>?
+        if malloc_get_all_zones(mach_task_self_, nil, &zoneList, &count) == KERN_SUCCESS, let list = zoneList {
+            for i in 0..<Int(count) {
+                if let ptr = UnsafeMutablePointer<malloc_zone_t>(bitPattern: list[i]) {
+                    _ = malloc_zone_pressure_relief(ptr, 0)
+                }
+            }
+        }
+        if let pz = malloc_default_purgeable_zone() {
+            _ = malloc_zone_pressure_relief(pz, 0)
+        }
+        _ = malloc_zone_pressure_relief(nil, 0)
     }
 }
 
@@ -368,6 +378,13 @@ public final class DragMonitorService {
     private func handleMouseUp() {
         isDraggingFile = false
         if isWheelOpen { onMouseReleased?() }
+    }
+
+    public func stopMonitoring() {
+        for m in monitors {
+            NSEvent.removeMonitor(m)
+        }
+        monitors.removeAll()
     }
 }
 
@@ -1490,8 +1507,11 @@ public struct FolderInspectorView: View {
         .background(LiquidWindowBackground())
         .onExitCommand(perform: onClose)
         .onAppear {
-            let fileIcon = NSWorkspace.shared.icon(forFile: sourceURL.path)
-            fileIcon.size = NSSize(width: 58, height: 58)
+            let rawIcon = NSWorkspace.shared.icon(forFile: sourceURL.path)
+            let fileIcon = NSImage(size: NSSize(width: 58, height: 58))
+            fileIcon.lockFocus()
+            rawIcon.draw(in: NSRect(x: 0, y: 0, width: 58, height: 58), from: .zero, operation: .copy, fraction: 1.0)
+            fileIcon.unlockFocus()
             icon = fileIcon
             startLoading()
         }
@@ -1866,8 +1886,11 @@ public final class WheelState: ObservableObject {
         self.mode = mode
         self.interaction = interaction
         self.config = RadialMenuConfiguration.build(for: fileURLs[0], mode: mode)
-        let icon = NSWorkspace.shared.icon(forFile: fileURLs[0].path)
-        icon.size = NSSize(width: 32, height: 32)
+        let rawIcon = NSWorkspace.shared.icon(forFile: fileURLs[0].path)
+        let icon = NSImage(size: NSSize(width: 32, height: 32))
+        icon.lockFocus()
+        rawIcon.draw(in: NSRect(x: 0, y: 0, width: 32, height: 32), from: .zero, operation: .copy, fraction: 1.0)
+        icon.unlockFocus()
         self.fileIcon = icon
     }
 
@@ -2060,6 +2083,11 @@ public struct RadialWheelView: View {
         .animation(.easeOut(duration: 0.12), value: state.pointerActive)
         .animation(.spring(response: 0.30, dampingFraction: 0.8), value: state.mode)
         .animation(.easeOut(duration: 0.14), value: state.committedID)
+        .onDisappear {
+            state.onCommit = nil
+            state.onDismiss = nil
+            MemoryOptimizer.reclaimMemory()
+        }
     }
 }
 
@@ -2250,6 +2278,17 @@ final class WheelInteractionView: NSView {
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeAlways, .inVisibleRect],
                                        owner: self, userInfo: nil))
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            trackingAreas.forEach(removeTrackingArea)
+            onPointer = nil
+            canDrop = nil
+            onDrop = nil
+            onClick = nil
+        }
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -3534,6 +3573,9 @@ public struct ThemeSettingsView: View {
         .frame(width: 500, height: 680)
         .background(LiquidWindowBackground())
         .onExitCommand(perform: onClose)
+        .onDisappear {
+            MemoryOptimizer.reclaimMemory()
+        }
     }
 
     @ViewBuilder
@@ -3668,7 +3710,7 @@ public final class AppUpdateService: ObservableObject {
         if let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, !v.isEmpty {
             return v
         }
-        return "1.0.3"
+        return "1.0.4"
     }
 
     @Published public var state: UpdateState = .idle
@@ -3708,6 +3750,9 @@ public final class AppUpdateService: ObservableObject {
         let delegate = RedirectDelegate()
         let config = URLSessionConfiguration.ephemeral
         let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        defer {
+            session.finishTasksAndInvalidate()
+        }
         let webURL = URL(string: "https://github.com/\(Self.repoOwner)/\(Self.repoName)/releases/latest")!
         var req = URLRequest(url: webURL)
         req.setValue("OpenTangerine/\(Self.currentVersion) (macOS)", forHTTPHeaderField: "User-Agent")
@@ -3927,6 +3972,11 @@ public struct UpdateView: View {
         .frame(width: 480, height: 430)
         .background(LiquidWindowBackground())
         .onExitCommand(perform: onClose)
+        .onDisappear {
+            updater.latestRelease = nil
+            updater.state = .idle
+            MemoryOptimizer.reclaimMemory()
+        }
     }
 
     private var checkingView: some View {
@@ -4217,6 +4267,11 @@ public final class AppCoordinator: ObservableObject {
         setupIdleMaintenance()
     }
 
+    deinit {
+        idleMaintenanceTimer?.invalidate()
+        idleMaintenanceTimer = nil
+    }
+
     private func setupIdleMaintenance() {
         idleMaintenanceTimer = Timer.scheduledTimer(withTimeInterval: 20.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -4318,6 +4373,7 @@ public final class AppCoordinator: ObservableObject {
         }
 
         if let existing = self.wheelPanel {
+            existing.contentView = nil
             existing.orderOut(nil)
             existing.close()
             self.wheelPanel = nil
@@ -4371,6 +4427,7 @@ public final class AppCoordinator: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
             guard let self else { return }
             if let panel = self.wheelPanel {
+                panel.contentView = nil
                 panel.orderOut(nil)
                 panel.close()
                 self.wheelPanel = nil
@@ -4529,6 +4586,7 @@ public final class AppCoordinator: ObservableObject {
         editorWindow = nil
         editorWindowDelegate = nil
         win.delegate = nil
+        win.contentView = nil
         win.orderOut(nil)
         win.close()
         MemoryOptimizer.reclaimMemory()
@@ -4561,8 +4619,11 @@ public final class AppCoordinator: ObservableObject {
 
         let delegate = EditorWindowDelegate()
         delegate.onClose = { [weak self] in
-            self?.editorWindow = nil
-            self?.editorWindowDelegate = nil
+            guard let self else { return }
+            self.editorWindow?.contentView = nil
+            self.editorWindow = nil
+            self.editorWindowDelegate = nil
+            MemoryOptimizer.reclaimMemory()
         }
         win.delegate = delegate
         self.editorWindowDelegate = delegate

@@ -16,42 +16,61 @@ OpenTangerine lives in your menu bar. Start dragging any file in Finder, then ho
 "wheel" menu pops up under your cursor. Release over a slice to run the action — the result is saved next to the
 original file and revealed in Finder.
 
-| Gesture | Wheel | What you get |
-|---|---|---|
-| **⇧ Shift + Drag** | Convert | PDF → DOCX / JPG / PNG / TXT · Images → PNG / WEBP / HEIC / JPG / AVIF / BMP / PDF / DOCX / TIFF |
-| **⌥⇧ Option + Shift + Drag** | Tools | Crop (aspect presets, pixel dimensions) · Add BG (backdrop, corners, shadow) · Metadata (EXIF/GPS inspector & clean export) · Compress |
+| Gesture | Target | Wheel | What you get |
+|---|---|---|---|
+| **⇧ Shift + Drag** | Files | Convert | PDF → DOCX / JPG / PNG / TXT · Images → PNG / WEBP / HEIC / JPG / AVIF / BMP / PDF / DOCX / TIFF |
+| **⇧ Shift + Drag** | Folders & ZIPs | Folder Actions | **Zip Folder** · **Unzip Archive** · **Folder/Archive Info** (file breakdown, disk size, nesting, permissions) |
+| **⌥⇧ Option + Shift + Drag** | Images | Tools | Crop (aspect presets, pixel dimensions) · Add BG (backdrop, corners, shadow) · Metadata (EXIF/GPS inspector & clean export) · Compress |
 
 Everything runs **100% offline** using Apple frameworks (PDFKit, ImageIO, CoreGraphics, SwiftUI).
 
-### 🎨 Customizable Themes & Liquid Glass
+### 📁 Folder & Archive Actions (⇧ Shift + Drag)
+
+Drag any folder or ZIP archive in Finder and hold **Shift (⇧)**:
+- **Zip Folder**: Instant offline compression using macOS `ditto` streams.
+- **Unzip Archive**: Seamless decompression with auto-collision naming.
+- **Folder / Archive Info**: Deep file inspector revealing recursive file/folder counts, nesting depth, disk space vs. logical size, file type breakdowns, largest files, POSIX permissions, and last-modified timestamps.
+
+### 🎨 Draggable Themes & Liquid Glass
 
 Customize the look and feel from the menu bar or **Theme & Appearance Settings** (`⌘,`):
-- **Tangerine Sunset**: The signature citrus orange with warm amber glow
-- **Liquid Glass**: Translucent fluid glass with specular iridescent rim and a live **customizable transparency slider** (Crystal, Balanced, Frosted) that connects to macOS System Settings (*Accessibility → Display → Reduce Transparency*)
-- **Cyber Cyan**: Electric neon cyan with cyber glow
-- **Neon Violet**: Deep ultraviolet with magenta luminescence
-- **Emerald Mint**: Fresh botanical mint & emerald green
-- **Solar Gold**: Radiant amber with golden warmth
-- **Monochrome**: Clean minimalist slate & frosted white
+- **Draggable Window**: Move and reposition the settings window anywhere on screen just like standard macOS windows.
+- **Tangerine Sunset**: The signature citrus orange with warm amber glow.
+- **Liquid Glass**: Translucent fluid glass with specular iridescent rim and a live **customizable transparency slider** (Crystal, Balanced, Frosted) that connects to macOS System Settings (*Accessibility → Display → Reduce Transparency*).
+- **Cyber Cyan**, **Neon Violet**, **Emerald Mint**, **Solar Gold**, and **Monochrome**.
 
-### ⚡ Performance, Memory & Stability (v1.0.3)
+### 🔄 In-App GitHub Auto-Updater (`⌘U`)
 
-- **Ultra-Low Memory Footprint (~16 MB)**: Active heap pressure relief and cache pruning (`malloc_zone_pressure_relief`) automatically return decoded bitmap caches and unused heap pages to the macOS kernel whenever the radial wheel dismisses or editors close.
-- **Crash-Free Window Architecture**: Fully isolated AppKit window management with zero use-after-free or dangling pointer hazards (`isReleasedWhenClosed = false`).
-- **Optimized Theme Switching**: Smooth real-time reactive theme transitions across the radial wheel, MenuBarExtra, and modal editors without AppKit menu tracking interference.
-- **Robust Metadata Engine**: Safe CoreGraphics image source validation and thumbnail dimensions checking.
-- **Keyboard Shortcuts**: Press `Escape` in any editor or settings window to dismiss immediately.
-- **Safe Batch Handling**: Multi-file drag protection ensures interactive tools launch cleanly for single inspection while batch converters process all selected files in parallel.
+Keep OpenTangerine up to date directly from the app:
+- Accessible via Menu Bar → **Check for Updates…** or shortcut `⌘U`.
+- Compares semantic versioning against the latest GitHub Releases.
+- Displays markdown release notes and download progress.
+- 1-click in-place update and automatic relaunch.
+
+### ⚡ Memory Leak-Free & Multi-Zone Optimization (v1.0.4)
+
+- **Zero Memory Leaks (Confirmed via `/usr/bin/leaks`)**: Completely eliminated delegate retain cycles in background network tasks, event monitors, and window observers.
+- **Multi-Zone Heap Pressure Relief**: Sweeps all Mach VM zones via `malloc_get_all_zones` and `malloc_zone_pressure_relief`, actively returning cached image representations and transient render trees to the kernel.
+- **Raster Downsampling**: Finder file icons and modal previews are downsampled on the fly (32×32 and 58×58), avoiding multi-megabyte bitmap representation caches.
+- **SwiftUI View Hierarchy Teardown**: Explicitly nullifies `contentView` and detaches event tracking areas on dismiss, ensuring instantaneous ARC deallocation of modal and radial views.
+- **Background Idle Maintenance**: Automated 20-second background maintenance sweeps keep idle memory low and stable.
 
 ## 📦 Install
 
-1. Download `OpenTangerine-<version>-macOS.zip` from the [Releases](https://github.com/Ayanatiach/OpenTangerine/releases) page
-   (or build it yourself — see below).
-2. Unzip and drag **OpenTangerine.app** into `/Applications`.
-3. The app is ad-hoc signed (not notarized), so on first launch **right-click → Open**, then confirm.
-   Alternatively: `xattr -dr com.apple.quarantine /Applications/OpenTangerine.app`
-4. Grant permissions when prompted in **System Settings → Privacy & Security**:
-   - **Accessibility** / **Input Monitoring** — needed to observe the Shift/Option keys and mouse while dragging in Finder.
+### Option A: Direct Download (Recommended)
+1. Download **[OpenTangerine-1.0.4-macOS.zip](https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.4/OpenTangerine-1.0.4-macOS.zip)** from the [Releases](https://github.com/Ayanatiach/OpenTangerine/releases) page.
+2. Unzip and drag **OpenTangerine.app** into your `/Applications` folder.
+3. Because the app is ad-hoc signed, on first launch **right-click → Open**, then click **Open**.
+   *(Or run: `xattr -dr com.apple.quarantine /Applications/OpenTangerine.app` in Terminal)*
+4. Grant **Accessibility / Input Monitoring** permissions when prompted in **System Settings → Privacy & Security** so OpenTangerine can detect Shift/Option drags in Finder.
+
+### Option B: One-Line Terminal Install
+```bash
+curl -fsSL https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.4/OpenTangerine-1.0.4-macOS.zip -o /tmp/OpenTangerine.zip && \
+unzip -q -o /tmp/OpenTangerine.zip -d /Applications && \
+xattr -dr com.apple.quarantine /Applications/OpenTangerine.app && \
+open -a /Applications/OpenTangerine.app
+```
 
 OpenTangerine runs as a menu-bar-only app (no Dock icon). Look for the ⬢ icon in the menu bar.
 
