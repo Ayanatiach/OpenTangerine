@@ -209,14 +209,10 @@ public struct RadialMenuConfiguration {
             let subtitle = category == .folder ? "Folder" : fileSizeString
             let primarySlice = RadialSlice(title: primary.rawValue, systemIcon: primary.systemIcon,
                                            hint: primary.hint(isArchive: isArchive), action: .folderAction(primary))
-            switch mode {
-            case .convert:
-                return RadialMenuConfiguration(outerSlices: [primarySlice], centerSubtitle: subtitle, emptyMessage: nil)
-            case .tools:
-                let info = RadialSlice(title: FolderAction.info.rawValue, systemIcon: FolderAction.info.systemIcon,
-                                       hint: FolderAction.info.hint(isArchive: isArchive), action: .folderAction(.info))
-                return RadialMenuConfiguration(outerSlices: [primarySlice, info], centerSubtitle: subtitle, emptyMessage: nil)
-            }
+            let info = RadialSlice(title: FolderAction.info.rawValue, systemIcon: FolderAction.info.systemIcon,
+                                   hint: FolderAction.info.hint(isArchive: isArchive), action: .folderAction(.info))
+            // Offer both primary action (ZIP/UNZIP) and metadata inspector (INFO) in Shift (convert) and tools modes
+            return RadialMenuConfiguration(outerSlices: [primarySlice, info], centerSubtitle: subtitle, emptyMessage: nil)
         }
 
         switch mode {
@@ -3274,9 +3270,11 @@ public struct MetadataInspectorView: View {
 public struct ThemeSettingsView: View {
     @ObservedObject var theme = ThemeManager.shared
     public var onClose: () -> Void
+    public var onCheckUpdates: (() -> Void)?
 
-    public init(onClose: @escaping () -> Void) {
+    public init(onClose: @escaping () -> Void, onCheckUpdates: (() -> Void)? = nil) {
         self.onClose = onClose
+        self.onCheckUpdates = onCheckUpdates
     }
 
     public var body: some View {
@@ -3500,9 +3498,40 @@ public struct ThemeSettingsView: View {
                 .foregroundColor(theme.currentTheme == .monochrome ? .black : .white)
                 .buttonStyle(.plain)
             }
-            .padding(14)
+            .padding(.horizontal, 14)
+            .padding(.top, 14)
+
+            Divider().padding(.horizontal, 14)
+
+            HStack {
+                HStack(spacing: 6) {
+                    Image(systemName: "circle.hexagongrid.fill")
+                        .font(.system(size: 12))
+                        .foregroundColor(theme.accent)
+                    Text("OpenTangerine v\(AppUpdateService.currentVersion)")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                Spacer()
+                if let onCheckUpdates {
+                    Button {
+                        onClose()
+                        onCheckUpdates()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                            Text("Check for Updates…")
+                        }
+                        .font(.system(size: 10.5, weight: .medium))
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.06)))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 12)
         }
-        .frame(width: 500, height: 640)
+        .frame(width: 500, height: 680)
         .background(LiquidWindowBackground())
         .onExitCommand(perform: onClose)
     }
@@ -3577,6 +3606,586 @@ public struct ThemeSettingsView: View {
                 .foregroundColor(isCurrent ? (theme.currentTheme == .monochrome ? .black : .white) : .primary)
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - 8b. Software Update Service & GitHub Releases Window
+
+public struct GitHubReleaseAsset: Codable, Sendable {
+    public let name: String
+    public let size: Int64
+    public let browser_download_url: String
+}
+
+public struct GitHubRelease: Codable, Sendable {
+    public let tag_name: String
+    public let name: String?
+    public let body: String?
+    public let html_url: String
+    public let published_at: String?
+    public let assets: [GitHubReleaseAsset]
+}
+
+public enum UpdateState: Equatable {
+    case idle
+    case checking
+    case upToDate(currentVersion: String)
+    case updateAvailable(latestVersion: String, currentVersion: String, release: GitHubRelease)
+    case downloading(progress: Double, status: String)
+    case readyToRelaunch(targetURL: URL)
+    case error(message: String)
+
+    public static func == (lhs: UpdateState, rhs: UpdateState) -> Bool {
+        switch (lhs, rhs) {
+        case (.idle, .idle), (.checking, .checking):
+            return true
+        case (.upToDate(let a), .upToDate(let b)):
+            return a == b
+        case (.updateAvailable(let l1, let c1, _), .updateAvailable(let l2, let c2, _)):
+            return l1 == l2 && c1 == c2
+        case (.downloading(let p1, let s1), .downloading(let p2, let s2)):
+            return p1 == p2 && s1 == s2
+        case (.readyToRelaunch(let u1), .readyToRelaunch(let u2)):
+            return u1 == u2
+        case (.error(let m1), .error(let m2)):
+            return m1 == m2
+        default:
+            return false
+        }
+    }
+}
+
+@MainActor
+public final class AppUpdateService: ObservableObject {
+    public static let shared = AppUpdateService()
+
+    public static let repoOwner = "Ayanatiach"
+    public static let repoName = "OpenTangerine"
+    public static let releasesAPI = URL(string: "https://api.github.com/repos/\(repoOwner)/\(repoName)/releases/latest")!
+    public static let repoReleasesWebURL = URL(string: "https://github.com/\(repoOwner)/\(repoName)/releases")!
+
+    public static var currentVersion: String {
+        if let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, !v.isEmpty {
+            return v
+        }
+        return "1.0.3"
+    }
+
+    @Published public var state: UpdateState = .idle
+    @Published public var latestRelease: GitHubRelease?
+    @Published public var downloadProgress: Double = 0.0
+    @Published public var statusMessage: String = ""
+
+    private init() {}
+
+    public static func parseVersionComponents(_ version: String) -> [Int] {
+        let clean = version.trimmingCharacters(in: CharacterSet(charactersIn: "vV \t\n\r"))
+        let base = clean.split(separator: "-").first.map(String.init) ?? clean
+        return base.split(separator: ".").compactMap { Int($0) }
+    }
+
+    public static func isVersion(_ v1: String, greaterThan v2: String) -> Bool {
+        let c1 = parseVersionComponents(v1)
+        let c2 = parseVersionComponents(v2)
+        let maxCount = max(c1.count, c2.count)
+        for i in 0..<maxCount {
+            let p1 = i < c1.count ? c1[i] : 0
+            let p2 = i < c2.count ? c2[i] : 0
+            if p1 > p2 { return true }
+            if p1 < p2 { return false }
+        }
+        return false
+    }
+
+    private func fetchLatestViaWebRedirect() async throws -> GitHubRelease {
+        final class RedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+            var targetURL: URL?
+            func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+                targetURL = request.url
+                completionHandler(nil)
+            }
+        }
+        let delegate = RedirectDelegate()
+        let config = URLSessionConfiguration.ephemeral
+        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        let webURL = URL(string: "https://github.com/\(Self.repoOwner)/\(Self.repoName)/releases/latest")!
+        var req = URLRequest(url: webURL)
+        req.setValue("OpenTangerine/\(Self.currentVersion) (macOS)", forHTTPHeaderField: "User-Agent")
+        _ = try? await session.data(for: req)
+
+        guard let finalURL = delegate.targetURL, finalURL.pathComponents.contains("tag") else {
+            throw NSError(domain: "OpenTangerine", code: 404, userInfo: [NSLocalizedDescriptionKey: "Could not resolve latest release tag from GitHub."])
+        }
+        let tag = finalURL.lastPathComponent
+        let cleanVer = tag.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+        let zipName = "OpenTangerine-\(cleanVer)-macOS.zip"
+        let downloadURL = "https://github.com/\(Self.repoOwner)/\(Self.repoName)/releases/download/\(tag)/\(zipName)"
+        let asset = GitHubReleaseAsset(name: zipName, size: 0, browser_download_url: downloadURL)
+        return GitHubRelease(
+            tag_name: tag,
+            name: "OpenTangerine \(tag)",
+            body: "Latest release available from GitHub Releases.",
+            html_url: finalURL.absoluteString,
+            published_at: nil,
+            assets: [asset]
+        )
+    }
+
+    public func checkForUpdates() async {
+        state = .checking
+        statusMessage = "Connecting to GitHub…"
+        do {
+            var request = URLRequest(url: Self.releasesAPI)
+            request.setValue("OpenTangerine/\(Self.currentVersion) (macOS)", forHTTPHeaderField: "User-Agent")
+            request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
+            request.timeoutInterval = 15
+
+            let release: GitHubRelease
+            if let (data, response) = try? await URLSession.shared.data(for: request),
+               let http = response as? HTTPURLResponse, http.statusCode == 200,
+               let decoded = try? JSONDecoder().decode(GitHubRelease.self, from: data) {
+                release = decoded
+            } else {
+                // If API is rate-limited or fails, fall back seamlessly to web redirect resolution
+                release = try await fetchLatestViaWebRedirect()
+            }
+
+            self.latestRelease = release
+            let latestTag = release.tag_name
+
+            if Self.isVersion(latestTag, greaterThan: Self.currentVersion) {
+                state = .updateAvailable(latestVersion: latestTag, currentVersion: Self.currentVersion, release: release)
+            } else {
+                state = .upToDate(currentVersion: Self.currentVersion)
+            }
+        } catch {
+            state = .error(message: error.localizedDescription)
+        }
+    }
+
+    public func install(release: GitHubRelease) async {
+        guard let asset = release.assets.first(where: { $0.name.hasSuffix(".zip") }) ?? release.assets.first else {
+            state = .error(message: "No downloadable release asset (.zip) found for \(release.tag_name).")
+            return
+        }
+        guard let downloadURL = URL(string: asset.browser_download_url) else {
+            state = .error(message: "Invalid asset download URL.")
+            return
+        }
+
+        downloadProgress = 0.1
+        state = .downloading(progress: 0.1, status: "Connecting to GitHub…")
+
+        do {
+            var request = URLRequest(url: downloadURL)
+            request.setValue("OpenTangerine/\(Self.currentVersion) (macOS)", forHTTPHeaderField: "User-Agent")
+            request.timeoutInterval = 60
+
+            downloadProgress = 0.25
+            state = .downloading(progress: 0.25, status: "Downloading \(asset.name)…")
+
+            let (tempDownloadURL, response) = try await URLSession.shared.download(for: request)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                state = .error(message: "Failed to download update package (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)).")
+                return
+            }
+
+            downloadProgress = 0.70
+            state = .downloading(progress: 0.70, status: "Extracting package…")
+
+            let fileManager = FileManager.default
+            let workDir = fileManager.temporaryDirectory.appendingPathComponent("OpenTangerineUpdate-\(UUID().uuidString)")
+            try fileManager.createDirectory(at: workDir, withIntermediateDirectories: true)
+
+            let zipPath = workDir.appendingPathComponent("update.zip")
+            try fileManager.moveItem(at: tempDownloadURL, to: zipPath)
+
+            // Extract with /usr/bin/ditto
+            let ditto = Process()
+            ditto.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            ditto.arguments = ["-xk", zipPath.path, workDir.path]
+            try ditto.run()
+            ditto.waitUntilExit()
+
+            guard ditto.terminationStatus == 0 else {
+                state = .error(message: "Failed to extract update package.")
+                return
+            }
+
+            // Find .app inside workDir
+            let contents = try fileManager.contentsOfDirectory(at: workDir, includingPropertiesForKeys: nil)
+            guard let newApp = contents.first(where: { $0.pathExtension == "app" }) else {
+                state = .error(message: "Downloaded archive does not contain OpenTangerine.app.")
+                return
+            }
+
+            downloadProgress = 0.95
+            state = .downloading(progress: 0.95, status: "Preparing installation & relaunch…")
+
+            // Determine target app location
+            let runningBundle = Bundle.main.bundleURL
+            let targetApp: URL
+            if runningBundle.pathExtension == "app" && runningBundle.path.hasPrefix("/Applications") {
+                targetApp = runningBundle
+            } else if fileManager.fileExists(atPath: "/Applications/OpenTangerine.app") {
+                targetApp = URL(fileURLWithPath: "/Applications/OpenTangerine.app")
+            } else {
+                targetApp = runningBundle
+            }
+
+            // Write helper relaunch script
+            let scriptPath = workDir.appendingPathComponent("relaunch.sh")
+            let scriptContent = """
+            #!/bin/bash
+            CURRENT_PID=\(ProcessInfo.processInfo.processIdentifier)
+            while kill -0 $CURRENT_PID 2>/dev/null; do
+                sleep 0.1
+            done
+            rm -rf "\(targetApp.path)"
+            cp -R "\(newApp.path)" "\(targetApp.path)"
+            xattr -dr com.apple.quarantine "\(targetApp.path)" 2>/dev/null || true
+            open "\(targetApp.path)"
+            """
+            try scriptContent.write(to: scriptPath, atomically: true, encoding: .utf8)
+
+            var perms = try fileManager.attributesOfItem(atPath: scriptPath.path)
+            perms[.posixPermissions] = 0o755
+            try fileManager.setAttributes(perms, ofItemAtPath: scriptPath.path)
+
+            state = .readyToRelaunch(targetURL: targetApp)
+
+            // Spawn detached relaunch script
+            let updaterProcess = Process()
+            updaterProcess.executableURL = URL(fileURLWithPath: "/bin/bash")
+            updaterProcess.arguments = ["-c", "nohup /bin/bash '\(scriptPath.path)' >/dev/null 2>&1 &"]
+            try updaterProcess.run()
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                NSApplication.shared.terminate(nil)
+            }
+        } catch {
+            state = .error(message: error.localizedDescription)
+        }
+    }
+}
+
+public struct UpdateView: View {
+    @ObservedObject private var updater = AppUpdateService.shared
+    @ObservedObject private var theme = ThemeManager.shared
+    public var onClose: () -> Void
+
+    public init(onClose: @escaping () -> Void) {
+        self.onClose = onClose
+    }
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            // Header with draggable titlebar
+            ZStack {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                        .foregroundColor(theme.accent)
+                    Text("Software Update")
+                        .font(.system(size: 14, weight: .bold))
+                }
+                HStack {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .frame(width: 24, height: 24)
+                            .background(Circle().fill(Color.black.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                }
+            }
+            .padding(14)
+            .background(WindowDragHandle())
+
+            Divider().padding(.horizontal, 14)
+
+            // Content Area based on UpdateState
+            Group {
+                switch updater.state {
+                case .idle, .checking:
+                    checkingView
+                case .upToDate(let current):
+                    upToDateView(current: current)
+                case .updateAvailable(let latest, let current, let release):
+                    updateAvailableView(latest: latest, current: current, release: release)
+                case .downloading(let progress, let status):
+                    downloadingView(progress: progress, status: status)
+                case .readyToRelaunch(let targetURL):
+                    readyToRelaunchView(targetURL: targetURL)
+                case .error(let message):
+                    errorView(message: message)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(16)
+        }
+        .frame(width: 480, height: 430)
+        .background(LiquidWindowBackground())
+        .onExitCommand(perform: onClose)
+    }
+
+    private var checkingView: some View {
+        VStack(spacing: 16) {
+            Spacer()
+            ProgressView()
+                .scaleEffect(1.3)
+            Text("Checking for updates…")
+                .font(.system(size: 14, weight: .semibold))
+            Text("Connecting to github.com/Ayanatiach/OpenTangerine")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+            Spacer()
+        }
+    }
+
+    private func upToDateView(current: String) -> some View {
+        VStack(spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(Color.green.opacity(0.15))
+                    .frame(width: 52, height: 52)
+                Image(systemName: "checkmark.seal.fill")
+                    .font(.system(size: 28))
+                    .foregroundColor(.green)
+            }
+            Text("OpenTangerine is Up to Date")
+                .font(.system(size: 15, weight: .bold))
+            Text("Version \(current) is currently the newest version available.")
+                .font(.system(size: 11.5))
+                .foregroundColor(.secondary)
+
+            if let release = updater.latestRelease {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(release.name ?? "Release \(release.tag_name)")
+                            .font(.system(size: 11, weight: .semibold))
+                        Spacer()
+                        if let pub = release.published_at?.prefix(10) {
+                            Text(String(pub))
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    if let body = release.body, !body.isEmpty {
+                        ScrollView {
+                            Text(body)
+                                .font(.system(size: 10.5))
+                                .foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(8)
+                        }
+                        .frame(height: 120)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+                    }
+                }
+                .padding(.top, 4)
+            }
+
+            Spacer()
+
+            HStack(spacing: 10) {
+                Button("Check Again") {
+                    Task { await updater.checkForUpdates() }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
+
+                if let release = updater.latestRelease {
+                    Button("Reinstall Latest") {
+                        Task { await updater.install(release: release) }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11))
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
+                }
+
+                Spacer()
+
+                Button("Done") {
+                    onClose()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11.5, weight: .semibold))
+                .padding(.horizontal, 16).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 7).fill(theme.accent))
+                .foregroundColor(theme.currentTheme == .monochrome ? .black : .white)
+            }
+        }
+    }
+
+    private func updateAvailableView(latest: String, current: String, release: GitHubRelease) -> some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(theme.accent.opacity(0.18))
+                        .frame(width: 46, height: 46)
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 22))
+                        .foregroundColor(theme.accent)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("New Version Available!")
+                        .font(.system(size: 15, weight: .bold))
+                    HStack(spacing: 6) {
+                        Text("Current: v\(current)")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
+                        Text("New: \(latest)")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(theme.accent)
+                    }
+                }
+                Spacer()
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(release.name ?? "Release \(latest)")
+                    .font(.system(size: 11.5, weight: .semibold))
+                ScrollView {
+                    Text(release.body ?? "No release notes provided.")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                }
+                .frame(height: 160)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+            }
+
+            Spacer()
+
+            HStack(spacing: 10) {
+                Button("View on GitHub") {
+                    if let url = URL(string: release.html_url) {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
+
+                Spacer()
+
+                Button("Later") {
+                    onClose()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
+
+                Button("Update & Relaunch") {
+                    Task { await updater.install(release: release) }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11.5, weight: .semibold))
+                .padding(.horizontal, 14).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 7).fill(theme.accent))
+                .foregroundColor(theme.currentTheme == .monochrome ? .black : .white)
+            }
+        }
+    }
+
+    private func downloadingView(progress: Double, status: String) -> some View {
+        VStack(spacing: 14) {
+            Spacer()
+            ZStack {
+                Circle()
+                    .fill(theme.accent.opacity(0.15))
+                    .frame(width: 56, height: 56)
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.system(size: 32))
+                    .foregroundColor(theme.accent)
+            }
+            Text(status)
+                .font(.system(size: 13, weight: .medium))
+            ProgressView(value: progress)
+                .tint(theme.accent)
+                .padding(.horizontal, 40)
+            Text("\(Int(progress * 100))%")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(.secondary)
+            Spacer()
+        }
+    }
+
+    private func readyToRelaunchView(targetURL: URL) -> some View {
+        VStack(spacing: 14) {
+            Spacer()
+            ZStack {
+                Circle()
+                    .fill(Color.green.opacity(0.15))
+                    .frame(width: 56, height: 56)
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 34))
+                    .foregroundColor(.green)
+            }
+            Text("Update Installed!")
+                .font(.system(size: 15, weight: .bold))
+            Text("Relaunching OpenTangerine…")
+                .font(.system(size: 11.5))
+                .foregroundColor(.secondary)
+            ProgressView()
+                .padding(.top, 4)
+            Spacer()
+        }
+    }
+
+    private func errorView(message: String) -> some View {
+        VStack(spacing: 12) {
+            Spacer()
+            ZStack {
+                Circle()
+                    .fill(Color.orange.opacity(0.15))
+                    .frame(width: 52, height: 52)
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 26))
+                    .foregroundColor(.orange)
+            }
+            Text("Unable to Check for Updates")
+                .font(.system(size: 14, weight: .bold))
+            Text(message)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 20)
+            Spacer()
+            HStack(spacing: 10) {
+                Button("Open GitHub Releases") {
+                    NSWorkspace.shared.open(AppUpdateService.repoReleasesWebURL)
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
+
+                Spacer()
+
+                Button("Retry") {
+                    Task { await updater.checkForUpdates() }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11.5, weight: .semibold))
+                .padding(.horizontal, 14).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 7).fill(theme.accent))
+                .foregroundColor(theme.currentTheme == .monochrome ? .black : .white)
+            }
+        }
     }
 }
 
@@ -3966,7 +4575,18 @@ public final class AppCoordinator: ObservableObject {
     public func openSettings() {
         openEditor(ThemeSettingsView(onClose: { [weak self] in
             self?.closeEditor()
-        }), size: CGSize(width: 500, height: 640))
+        }, onCheckUpdates: { [weak self] in
+            self?.openUpdates()
+        }), size: CGSize(width: 500, height: 680))
+    }
+
+    public func openUpdates() {
+        openEditor(UpdateView(onClose: { [weak self] in
+            self?.closeEditor()
+        }), size: CGSize(width: 480, height: 430))
+        Task {
+            await AppUpdateService.shared.checkForUpdates()
+        }
     }
 }
 
@@ -4143,7 +4763,7 @@ public struct OpenTangerineApp: App {
 
             let folderConfigConvert = RadialMenuConfiguration.build(for: testFolder, mode: .convert)
             let folderConfigTools = RadialMenuConfiguration.build(for: testFolder, mode: .tools)
-            assert(folderConfigConvert.outerSlices.count == 1 && folderConfigConvert.outerSlices[0].title == "ZIP", "Folder convert wheel must only have ZIP")
+            assert(folderConfigConvert.outerSlices.count == 2 && folderConfigConvert.outerSlices.map(\.title).contains("ZIP") && folderConfigConvert.outerSlices.map(\.title).contains("INFO"), "Folder convert wheel must have ZIP and INFO")
             assert(folderConfigTools.outerSlices.count == 2 && folderConfigTools.outerSlices.map(\.title).contains("ZIP") && folderConfigTools.outerSlices.map(\.title).contains("INFO"), "Folder tools wheel must have ZIP and INFO")
             print("  ✓ Wheel action exclusivity (folders vs photos): OK")
 
@@ -4178,6 +4798,23 @@ public struct OpenTangerineApp: App {
             RunLoop.current.run(until: Date().addingTimeInterval(0.1))
             coord.closeEditor()
             print("  ✓ Folder & Archive inspector open/close lifecycle: OK")
+
+            // AppUpdateService version parsing & comparison tests
+            assert(AppUpdateService.parseVersionComponents("v1.0.3") == [1, 0, 3])
+            assert(AppUpdateService.parseVersionComponents("1.0.4") == [1, 0, 4])
+            assert(AppUpdateService.parseVersionComponents("v2.0.0-beta.1") == [2, 0, 0])
+            assert(AppUpdateService.isVersion("v1.0.4", greaterThan: "1.0.3") == true)
+            assert(AppUpdateService.isVersion("v1.0.3", greaterThan: "1.0.3") == false)
+            assert(AppUpdateService.isVersion("1.0.3", greaterThan: "1.0.4") == false)
+            assert(AppUpdateService.isVersion("v1.10.0", greaterThan: "1.9.0") == true)
+            assert(AppUpdateService.isVersion("v2.0.0", greaterThan: "1.99.99") == true)
+            print("  ✓ AppUpdateService SemVer parser & comparator: OK")
+
+            // Updater window lifecycle test
+            coord.openUpdates()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            coord.closeEditor()
+            print("  ✓ Update inspector window open/close lifecycle: OK")
 
             // Clean up test items
             try? FileManager.default.removeItem(at: testFolder)
@@ -4250,6 +4887,10 @@ public struct OpenTangerineApp: App {
                     coordinator.openSettings()
                 }
                 .keyboardShortcut(",")
+                Button("Check for Updates…") {
+                    coordinator.openUpdates()
+                }
+                .keyboardShortcut("u")
                 Divider()
                 Button("Quit OpenTangerine") {
                     NSApplication.shared.terminate(nil)
