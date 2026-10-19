@@ -40,7 +40,6 @@ public enum MemoryOptimizer {
     @MainActor
     public static func reclaimMemory() {
         autoreleasepool {
-            CATransaction.flush()
             URLCache.shared.removeAllCachedResponses()
             if let pz = malloc_default_purgeable_zone() {
                 _ = malloc_zone_pressure_relief(pz, 0)
@@ -51,7 +50,6 @@ public enum MemoryOptimizer {
         // Run second pass after the runloop completes the current turn and drains autorelease pools
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             autoreleasepool {
-                CATransaction.flush()
                 if let pz = malloc_default_purgeable_zone() {
                     _ = malloc_zone_pressure_relief(pz, 0)
                 }
@@ -74,10 +72,19 @@ public enum WheelInteraction {
 }
 
 public enum FileCategory: String {
-    case pdf, image, video, audio, document, unknown
+    case pdf, image, video, audio, document, archive, folder, unknown
 
+    /// Detects the category of a file-system item. Folders are recognised on disk (not by name), so a
+    /// directory called `holiday.png` is still a folder. Packages such as `.app` bundles behave like
+    /// files in Finder and are therefore not treated as folders.
     public static func detect(from url: URL) -> FileCategory {
-        switch url.pathExtension.lowercased() {
+        if FolderTools.isFolder(url) { return .folder }
+        return category(forExtension: url.pathExtension)
+    }
+
+    /// Pure, extension-based classification (never touches the file system).
+    public static func category(forExtension ext: String) -> FileCategory {
+        switch ext.lowercased() {
         case "pdf":
             return .pdf
         case "jpg", "jpeg", "png", "webp", "heic", "heif", "tiff", "tif", "bmp", "gif", "avif":
@@ -88,6 +95,8 @@ public enum FileCategory: String {
             return .audio
         case "txt", "rtf", "docx", "md", "html", "htm":
             return .document
+        case "zip":
+            return .archive
         default:
             return .unknown
         }
@@ -108,6 +117,30 @@ public enum FileCategory: String {
 public enum RadialActionType: Equatable {
     case convertToFormat(String)
     case openTool(ToolKind)
+    case folderAction(FolderAction)
+}
+
+/// Actions that only apply to folders (zip / info) and ZIP archives (unzip / info).
+public enum FolderAction: String, Equatable {
+    case zip = "ZIP"
+    case unzip = "UNZIP"
+    case info = "INFO"
+
+    public var systemIcon: String {
+        switch self {
+        case .zip: return "doc.zipper"
+        case .unzip: return "arrow.up.bin"
+        case .info: return "info.circle"
+        }
+    }
+
+    public func hint(isArchive: Bool) -> String {
+        switch self {
+        case .zip: return "Compress to .zip"
+        case .unzip: return "Extract archive"
+        case .info: return isArchive ? "Inspect archive" : "Inspect folder"
+        }
+    }
 }
 
 public enum ToolKind: String, CaseIterable, Identifiable {
@@ -152,8 +185,10 @@ public struct RadialSlice: Identifiable, Equatable {
     }
 
     public var isTool: Bool {
-        if case .openTool = action { return true }
-        return false
+        switch action {
+        case .openTool, .folderAction: return true
+        case .convertToFormat: return false
+        }
     }
 }
 
@@ -166,6 +201,23 @@ public struct RadialMenuConfiguration {
         let category = FileCategory.detect(from: url)
         let fileSizeString = Self.formattedFileSize(for: url)
         let currentExt = FileCategory.normalizedExtension(url.pathExtension)
+
+        // Folders and ZIP archives get their own slices; everything else keeps the image/document wheels.
+        if category == .folder || category == .archive {
+            let isArchive = category == .archive
+            let primary: FolderAction = isArchive ? .unzip : .zip
+            let subtitle = category == .folder ? "Folder" : fileSizeString
+            let primarySlice = RadialSlice(title: primary.rawValue, systemIcon: primary.systemIcon,
+                                           hint: primary.hint(isArchive: isArchive), action: .folderAction(primary))
+            switch mode {
+            case .convert:
+                return RadialMenuConfiguration(outerSlices: [primarySlice], centerSubtitle: subtitle, emptyMessage: nil)
+            case .tools:
+                let info = RadialSlice(title: FolderAction.info.rawValue, systemIcon: FolderAction.info.systemIcon,
+                                       hint: FolderAction.info.hint(isArchive: isArchive), action: .folderAction(.info))
+                return RadialMenuConfiguration(outerSlices: [primarySlice, info], centerSubtitle: subtitle, emptyMessage: nil)
+            }
+        }
 
         switch mode {
         case .convert:
@@ -330,6 +382,7 @@ public enum ConversionError: LocalizedError {
     case unsupportedConversion(String)
     case exportFailed(String)
     case alreadyOptimized(String)
+    case archiveFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -337,6 +390,7 @@ public enum ConversionError: LocalizedError {
         case .unsupportedConversion(let msg): return "Unsupported conversion: \(msg)"
         case .exportFailed(let msg): return "Export failed: \(msg)"
         case .alreadyOptimized(let msg): return msg
+        case .archiveFailed(let msg): return msg
         }
     }
 }
@@ -802,6 +856,757 @@ enum StoredZipArchive {
 
     private static func le16(_ v: UInt16) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
     private static func le32(_ v: UInt32) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+}
+
+// MARK: - Folder & Archive Tools (zip / unzip / inspect)
+
+enum FolderTools {
+    /// True for real folders only. Packages (`.app`, `.rtfd`, …) are shown as files by Finder, so they are excluded.
+    static func isFolder(_ url: URL) -> Bool {
+        guard let values = try? url.resolvingSymlinksInPath().resourceValues(forKeys: [.isDirectoryKey, .isPackageKey]) else {
+            return false
+        }
+        return values.isDirectory == true && values.isPackage != true
+    }
+
+    static func fileSize(_ url: URL) -> Int64 {
+        Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+    }
+}
+
+public struct FolderArchiveResult: Sendable {
+    public let output: URL
+    public let archiveBytes: Int64
+    /// Number of entries in the archive when known (extraction), otherwise nil.
+    public let entryCount: Int?
+}
+
+/// Zips folders and extracts `.zip` archives with the system `ditto` / `unzip` tools. Both stream from disk, so
+/// even multi-gigabyte folders never get loaded into this process's memory.
+public final class FolderArchiveEngine: @unchecked Sendable {
+    public static let shared = FolderArchiveEngine()
+
+    private static let dittoPath = "/usr/bin/ditto"
+    private static let unzipPath = "/usr/bin/unzip"
+
+    // MARK: Zip
+
+    @discardableResult
+    public func zipFolder(at folder: URL) throws -> FolderArchiveResult {
+        guard FolderTools.isFolder(folder) else {
+            throw ConversionError.unsupportedConversion("“\(folder.lastPathComponent)” isn't a folder")
+        }
+        let source = folder.standardizedFileURL
+        guard source.pathComponents.count > 1 else {
+            throw ConversionError.archiveFailed("The root of a volume can't be zipped.")
+        }
+        let parent = source.deletingLastPathComponent()
+        let fm = FileManager.default
+        guard fm.isWritableFile(atPath: parent.path) else {
+            throw ConversionError.archiveFailed("“\(parent.lastPathComponent)” isn't writable, so the .zip can't be saved next to the folder.")
+        }
+
+        let destination = FileConversionEngine.shared.uniqueOutputURL(in: parent, baseName: source.lastPathComponent, ext: "zip")
+        // Build into a hidden temp file first so a half-written .zip never shows up in Finder.
+        let partial = parent.appendingPathComponent(".\(destination.lastPathComponent).\(UUID().uuidString.prefix(8)).partial")
+        defer { try? fm.removeItem(at: partial) }
+
+        let result = try Self.run(Self.dittoPath, ["-c", "-k", "--sequesterRsrc", "--keepParent", source.path, partial.path])
+        guard result.status == 0 else {
+            throw ConversionError.archiveFailed(result.stderr.isEmpty ? "ditto exited with status \(result.status)." : result.stderr)
+        }
+        try fm.moveItem(at: partial, to: destination)
+        return FolderArchiveResult(output: destination, archiveBytes: FolderTools.fileSize(destination), entryCount: nil)
+    }
+
+    // MARK: Unzip
+
+    @discardableResult
+    public func unzipArchive(at archive: URL) throws -> FolderArchiveResult {
+        guard FileCategory.detect(from: archive) == .archive else {
+            throw ConversionError.unsupportedConversion("“\(archive.lastPathComponent)” isn't a .zip archive")
+        }
+        let names = try Self.entryNames(in: archive)
+        let parent = archive.deletingLastPathComponent()
+        let fm = FileManager.default
+        guard fm.isWritableFile(atPath: parent.path) else {
+            throw ConversionError.archiveFailed("“\(parent.lastPathComponent)” isn't writable, so the archive can't be extracted there.")
+        }
+
+        // Extract into a hidden staging folder on the same volume, then move the result into place atomically.
+        let staging = parent.appendingPathComponent(".OpenTangerine-extract-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try fm.createDirectory(at: staging, withIntermediateDirectories: false)
+        defer { try? fm.removeItem(at: staging) }
+
+        let result = try Self.run(Self.dittoPath, ["-x", "-k", archive.path, staging.path])
+        guard result.status == 0 else {
+            throw ConversionError.archiveFailed(result.stderr.isEmpty ? "ditto exited with status \(result.status)." : result.stderr)
+        }
+
+        let junk: Set<String> = ["__MACOSX", ".DS_Store"]
+        let top = try fm.contentsOfDirectory(at: staging, includingPropertiesForKeys: [.isDirectoryKey], options: [])
+            .filter { !junk.contains($0.lastPathComponent) }
+
+        let output: URL
+        if top.count == 1, let only = top.first {
+            // A single top-level item (the usual case for archives made by Finder) is extracted as-is, without
+            // wrapping it in a redundant extra folder.
+            let isDirectory = (try? only.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            output = Self.uniqueDestination(in: parent, name: only.lastPathComponent, isDirectory: isDirectory)
+            try fm.moveItem(at: only, to: output)
+        } else {
+            for name in junk { try? fm.removeItem(at: staging.appendingPathComponent(name)) }
+            output = Self.uniqueDestination(in: parent, name: archive.deletingPathExtension().lastPathComponent, isDirectory: true)
+            try fm.moveItem(at: staging, to: output)
+        }
+        return FolderArchiveResult(output: output, archiveBytes: FolderTools.fileSize(archive), entryCount: names.count)
+    }
+
+    // MARK: Helpers
+
+    /// Lists archive entry names and rejects archives with absolute or parent-escaping paths ("zip-slip").
+    static func entryNames(in archive: URL) throws -> [String] {
+        let result = try run(unzipPath, ["-Z1", archive.path])
+        let names = String(decoding: result.stdout, as: UTF8.self)
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+        if result.status > 1 || (result.status == 1 && names.isEmpty && !result.stderr.isEmpty) {
+            throw ConversionError.archiveFailed("“\(archive.lastPathComponent)” isn't a readable ZIP archive.")
+        }
+        for name in names {
+            let components = name.split(whereSeparator: { $0 == "/" || $0 == "\\" })
+            if name.hasPrefix("/") || components.contains("..") {
+                throw ConversionError.archiveFailed("The archive contains an unsafe path (“\(name)”) and was not extracted.")
+            }
+        }
+        return names
+    }
+
+    static func uniqueDestination(in directory: URL, name: String, isDirectory: Bool) -> URL {
+        let fm = FileManager.default
+        var candidate = directory.appendingPathComponent(name, isDirectory: isDirectory)
+        guard fm.fileExists(atPath: candidate.path) else { return candidate }
+        let ns = name as NSString
+        let base = isDirectory ? name : ns.deletingPathExtension
+        let ext = isDirectory ? "" : ns.pathExtension
+        var counter = 2
+        repeat {
+            let numbered = ext.isEmpty ? "\(base) \(counter)" : "\(base) \(counter).\(ext)"
+            candidate = directory.appendingPathComponent(numbered, isDirectory: isDirectory)
+            counter += 1
+        } while fm.fileExists(atPath: candidate.path)
+        return candidate
+    }
+
+    struct ProcessOutput {
+        let status: Int32
+        let stdout: Data
+        let stderr: String
+    }
+
+    private final class DataBox: @unchecked Sendable { var data = Data() }
+
+    /// Runs a tool and collects stdout/stderr without risking a full-pipe deadlock.
+    static func run(_ launchPath: String, _ arguments: [String]) throws -> ProcessOutput {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: launchPath)
+        process.arguments = arguments
+        let outPipe = Pipe(), errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+        process.standardInput = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            throw ConversionError.archiveFailed("Couldn't launch \(URL(fileURLWithPath: launchPath).lastPathComponent): \(error.localizedDescription)")
+        }
+
+        let errBox = DataBox()
+        let group = DispatchGroup()
+        group.enter()
+        DispatchQueue.global(qos: .utility).async {
+            errBox.data = errPipe.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        group.wait()
+        process.waitUntilExit()
+
+        return ProcessOutput(
+            status: process.terminationStatus,
+            stdout: outData,
+            stderr: String(decoding: errBox.data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+}
+
+/// One parsed line of `unzip -Zl`.
+struct ZipListingEntry {
+    let name: String
+    let uncompressed: Int64
+    let compressed: Int64
+    let isDirectory: Bool
+    let isSymlink: Bool
+
+    /// Parses the long listing: `perms version os size flags csize method date time name…`
+    static func parse(_ text: String) -> [ZipListingEntry] {
+        var entries: [ZipListingEntry] = []
+        for line in text.split(whereSeparator: \.isNewline) {
+            let parts = line.split(separator: " ", maxSplits: 9, omittingEmptySubsequences: true)
+            guard parts.count == 10, parts[0].count == 10,
+                  let first = parts[0].first, "-dlcbps".contains(first),
+                  let size = Int64(parts[3]), let csize = Int64(parts[5]) else { continue }
+            entries.append(ZipListingEntry(
+                name: String(parts[9]),
+                uncompressed: size,
+                compressed: csize,
+                isDirectory: first == "d" || parts[9].hasSuffix("/"),
+                isSymlink: first == "l"
+            ))
+        }
+        return entries
+    }
+}
+
+public struct FolderMetadataReport: Sendable {
+    public enum Kind: Sendable { case folder, archive }
+
+    public let kind: Kind
+    public let name: String
+    public let badges: [String]
+    public let sections: [ImageMetadataSection]
+    /// True when a very large folder was only scanned up to the item limit.
+    public let isPartial: Bool
+    public let errorMessage: String?
+
+    public var fullTextSummary: String {
+        var lines = [name]
+        for section in sections {
+            lines.append("")
+            lines.append(section.title)
+            for item in section.items { lines.append("  \(item.label): \(item.value)") }
+        }
+        if isPartial { lines.append("\n(Partial scan — folder is very large)") }
+        return lines.joined(separator: "\n")
+    }
+
+    static let scanItemLimit = 500_000
+
+    // MARK: Formatting helpers
+
+    private static func bytes(_ value: Int64) -> String {
+        let human = ByteCountFormatter.string(fromByteCount: value, countStyle: .file)
+        guard value >= 1024 else { return human }
+        let exact = NumberFormatter.localizedString(from: NSNumber(value: value), number: .decimal)
+        return "\(human) (\(exact) bytes)"
+    }
+
+    private static func shortBytes(_ value: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: value, countStyle: .file)
+    }
+
+    private static func count(_ value: Int, _ singular: String, _ plural: String? = nil) -> String {
+        "\(NumberFormatter.localizedString(from: NSNumber(value: value), number: .decimal)) \(value == 1 ? singular : (plural ?? singular + "s"))"
+    }
+
+    private static func date(_ value: Date?) -> String? {
+        guard let value else { return nil }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: value)
+    }
+
+    private static func permissions(_ mode: Int) -> String {
+        let flags = ["r", "w", "x"]
+        let symbolic = (0..<9).map { index -> String in
+            (mode >> (8 - index)) & 1 == 1 ? flags[index % 3] : "-"
+        }.joined()
+        return "\(String(mode & 0o777, radix: 8)) (\(symbolic))"
+    }
+
+    private static func generalRows(for url: URL, kind: String) -> [ImageMetadataItem] {
+        let values = try? url.resourceValues(forKeys: [
+            .creationDateKey, .contentModificationDateKey, .contentAccessDateKey, .volumeNameKey, .tagNamesKey
+        ])
+        var rows = [
+            ImageMetadataItem(label: "Name", value: url.lastPathComponent),
+            ImageMetadataItem(label: "Kind", value: kind),
+            ImageMetadataItem(label: "Location", value: url.deletingLastPathComponent().path)
+        ]
+        if let volume = values?.volumeName { rows.append(ImageMetadataItem(label: "Volume", value: volume)) }
+        if let created = date(values?.creationDate) { rows.append(ImageMetadataItem(label: "Created", value: created)) }
+        if let modified = date(values?.contentModificationDate) { rows.append(ImageMetadataItem(label: "Modified", value: modified)) }
+        if let opened = date(values?.contentAccessDate) { rows.append(ImageMetadataItem(label: "Last opened", value: opened)) }
+        if let tags = values?.tagNames, !tags.isEmpty {
+            rows.append(ImageMetadataItem(label: "Tags", value: tags.joined(separator: ", ")))
+        }
+        return rows
+    }
+
+    private static func failure(_ url: URL, kind: Kind, message: String) -> FolderMetadataReport {
+        FolderMetadataReport(kind: kind, name: url.lastPathComponent, badges: [], sections: [], isPartial: false, errorMessage: message)
+    }
+
+    // MARK: Folder
+
+    /// Walks the folder (without following symlinks) and summarises it. Blocking — call off the main thread.
+    public static func loadFolder(at url: URL, isCancelled: () -> Bool = { false }) -> FolderMetadataReport {
+        let fm = FileManager.default
+        let root = url.standardizedFileURL
+        let rootPrefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey,
+                                      .totalFileAllocatedSizeKey, .isHiddenKey, .contentModificationDateKey]
+
+        var unreadable = 0
+        guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: keys, options: [],
+                                             errorHandler: { _, _ in unreadable += 1; return true }) else {
+            return failure(url, kind: .folder, message: "OpenTangerine couldn't open this folder.")
+        }
+
+        struct Tally { var count = 0; var bytes: Int64 = 0 }
+        var files = 0, folders = 0, symlinks = 0, hidden = 0, emptyFiles = 0, maxDepth = 0, examined = 0
+        var logical: Int64 = 0, onDisk: Int64 = 0
+        var byCategory: [FileCategory: Tally] = [:]
+        var largest: [(path: String, size: Int64)] = []
+        var newest: (date: Date, path: String)?
+        var partial = false
+        var finished = false
+
+        while !finished {
+            autoreleasepool {
+                for _ in 0..<2000 {
+                    guard let item = enumerator.nextObject() as? URL else { finished = true; return }
+                    examined += 1
+                    maxDepth = max(maxDepth, enumerator.level)
+                    guard let values = try? item.resourceValues(forKeys: Set(keys)) else { unreadable += 1; continue }
+                    if values.isHidden == true { hidden += 1 }
+                    if values.isSymbolicLink == true { symlinks += 1; continue }
+                    if values.isDirectory == true { folders += 1; continue }
+
+                    files += 1
+                    let size = Int64(values.fileSize ?? 0)
+                    logical += size
+                    onDisk += Int64(values.totalFileAllocatedSize ?? values.fileSize ?? 0)
+                    if size == 0 { emptyFiles += 1 }
+                    let category = FileCategory.category(forExtension: item.pathExtension)
+                    byCategory[category, default: Tally()].count += 1
+                    byCategory[category, default: Tally()].bytes += size
+
+                    let relative = item.path.hasPrefix(rootPrefix) ? String(item.path.dropFirst(rootPrefix.count)) : item.lastPathComponent
+                    if largest.count < 5 || size > (largest.last?.size ?? 0) {
+                        largest.append((relative, size))
+                        largest.sort { $0.size > $1.size }
+                        if largest.count > 5 { largest.removeLast() }
+                    }
+                    if let modified = values.contentModificationDate, modified > (newest?.date ?? .distantPast) {
+                        newest = (modified, relative)
+                    }
+                }
+            }
+            if isCancelled() { break }
+            if examined >= scanItemLimit { partial = true; break }
+        }
+
+        // General
+        var sections = [ImageMetadataSection(title: "General", icon: "folder", items: generalRows(for: url, kind: "Folder"))]
+
+        // Contents
+        var contents = [
+            ImageMetadataItem(label: "Total items", value: count(files + folders + symlinks, "item")),
+            ImageMetadataItem(label: "Files", value: NumberFormatter.localizedString(from: NSNumber(value: files), number: .decimal)),
+            ImageMetadataItem(label: "Subfolders", value: NumberFormatter.localizedString(from: NSNumber(value: folders), number: .decimal)),
+            ImageMetadataItem(label: "Nesting depth", value: "\(maxDepth) level\(maxDepth == 1 ? "" : "s")")
+        ]
+        if symlinks > 0 { contents.append(ImageMetadataItem(label: "Symlinks", value: "\(symlinks)")) }
+        if hidden > 0 { contents.append(ImageMetadataItem(label: "Hidden items", value: "\(hidden)")) }
+        if emptyFiles > 0 { contents.append(ImageMetadataItem(label: "Empty files", value: "\(emptyFiles)")) }
+        if unreadable > 0 { contents.append(ImageMetadataItem(label: "Unreadable", value: "\(unreadable) (permissions)")) }
+        if let newest, let when = date(newest.date) {
+            contents.append(ImageMetadataItem(label: "Latest change", value: "\(when) — \(newest.path)"))
+        }
+        sections.append(ImageMetadataSection(title: "Contents", icon: "square.stack.3d.up", items: contents))
+
+        // Size
+        sections.append(ImageMetadataSection(title: "Size", icon: "internaldrive", items: [
+            ImageMetadataItem(label: "Total size", value: bytes(logical)),
+            ImageMetadataItem(label: "Size on disk", value: bytes(onDisk))
+        ]))
+
+        // Breakdown by kind of file
+        let kinds: [(FileCategory, String)] = [(.image, "Images"), (.video, "Videos"), (.audio, "Audio"), (.pdf, "PDFs"),
+                                               (.document, "Documents"), (.archive, "Archives"), (.unknown, "Other")]
+        let breakdown = kinds.compactMap { category, label -> ImageMetadataItem? in
+            guard let tally = byCategory[category], tally.count > 0 else { return nil }
+            return ImageMetadataItem(label: label, value: "\(count(tally.count, "file")) · \(shortBytes(tally.bytes))")
+        }
+        if !breakdown.isEmpty {
+            sections.append(ImageMetadataSection(title: "File Types", icon: "chart.pie", items: breakdown))
+        }
+
+        // Largest files (size on the left, path on the right so long paths can wrap)
+        let big = largest.filter { $0.size > 0 }
+        if !big.isEmpty {
+            sections.append(ImageMetadataSection(title: "Largest Files", icon: "arrow.up.right.square",
+                                                 items: big.map { ImageMetadataItem(label: shortBytes($0.size), value: $0.path) }))
+        }
+
+        // Ownership & permissions
+        let attrs = (try? fm.attributesOfItem(atPath: url.path)) ?? [:]
+        var access = [ImageMetadataItem]()
+        if let owner = attrs[.ownerAccountName] as? String { access.append(ImageMetadataItem(label: "Owner", value: owner)) }
+        if let group = attrs[.groupOwnerAccountName] as? String { access.append(ImageMetadataItem(label: "Group", value: group)) }
+        if let mode = (attrs[.posixPermissions] as? NSNumber)?.intValue {
+            access.append(ImageMetadataItem(label: "Permissions", value: permissions(mode)))
+        }
+        access.append(ImageMetadataItem(label: "Readable", value: fm.isReadableFile(atPath: url.path) ? "Yes" : "No"))
+        access.append(ImageMetadataItem(label: "Writable", value: fm.isWritableFile(atPath: url.path) ? "Yes" : "No"))
+        sections.append(ImageMetadataSection(title: "Access", icon: "lock.shield", items: access))
+
+        return FolderMetadataReport(
+            kind: .folder,
+            name: url.lastPathComponent,
+            badges: [count(files, "file"), count(folders, "folder"), shortBytes(logical)],
+            sections: sections,
+            isPartial: partial,
+            errorMessage: nil
+        )
+    }
+
+    // MARK: Archive
+
+    public static func loadArchive(at url: URL, isCancelled: () -> Bool = { false }) -> FolderMetadataReport {
+        let listing: FolderArchiveEngine.ProcessOutput
+        do {
+            listing = try FolderArchiveEngine.run("/usr/bin/unzip", ["-Zl", url.path])
+        } catch {
+            return failure(url, kind: .archive, message: error.localizedDescription)
+        }
+        let entries = ZipListingEntry.parse(String(decoding: listing.stdout, as: UTF8.self))
+        guard listing.status <= 1, !(entries.isEmpty && listing.status != 0) else {
+            return failure(url, kind: .archive, message: "This doesn't look like a readable ZIP archive.")
+        }
+        if isCancelled() { return failure(url, kind: .archive, message: "Cancelled") }
+
+        // Finder-made archives carry resource-fork copies under __MACOSX/; report them separately.
+        let real = entries.filter { !$0.name.hasPrefix("__MACOSX/") && $0.name != "__MACOSX/" }
+        let metadataEntries = entries.count - real.count
+        let fileEntries = real.filter { !$0.isDirectory && !$0.isSymlink }
+        let folderEntries = real.filter { $0.isDirectory }
+        let symlinkEntries = real.filter { $0.isSymlink }
+        let uncompressed = real.reduce(Int64(0)) { $0 + $1.uncompressed }
+        let compressed = real.reduce(Int64(0)) { $0 + $1.compressed }
+        let archiveSize = FolderTools.fileSize(url)
+
+        var general = generalRows(for: url, kind: "ZIP archive")
+        general.append(ImageMetadataItem(label: "Archive size", value: bytes(archiveSize)))
+        var sections = [ImageMetadataSection(title: "General", icon: "doc.zipper", items: general)]
+
+        var contents = [
+            ImageMetadataItem(label: "Total entries", value: count(real.count, "entry", "entries")),
+            ImageMetadataItem(label: "Files", value: "\(fileEntries.count)"),
+            ImageMetadataItem(label: "Folders", value: "\(folderEntries.count)")
+        ]
+        if !symlinkEntries.isEmpty { contents.append(ImageMetadataItem(label: "Symlinks", value: "\(symlinkEntries.count)")) }
+        if metadataEntries > 0 { contents.append(ImageMetadataItem(label: "macOS metadata", value: "\(metadataEntries) hidden entries (__MACOSX)")) }
+        sections.append(ImageMetadataSection(title: "Contents", icon: "square.stack.3d.up", items: contents))
+
+        var sizeRows = [
+            ImageMetadataItem(label: "Uncompressed", value: bytes(uncompressed)),
+            ImageMetadataItem(label: "Compressed", value: bytes(compressed))
+        ]
+        if uncompressed > 0 {
+            let saved = (1 - Double(compressed) / Double(uncompressed)) * 100
+            sizeRows.append(ImageMetadataItem(label: "Space saved", value: saved > 0 ? String(format: "%.0f%% smaller", saved) : "No savings"))
+        }
+        sections.append(ImageMetadataSection(title: "Size", icon: "internaldrive", items: sizeRows))
+
+        // Top-level items
+        var topLevel: [String] = []
+        for entry in real {
+            let first = entry.name.split(separator: "/", maxSplits: 1).first.map(String.init) ?? entry.name
+            let label = (entry.name.contains("/") || entry.isDirectory) ? first + "/" : first
+            if !topLevel.contains(label) { topLevel.append(label) }
+        }
+        if !topLevel.isEmpty {
+            let shown = topLevel.prefix(8).joined(separator: "\n")
+            let more = topLevel.count > 8 ? "\n+ \(topLevel.count - 8) more" : ""
+            sections.append(ImageMetadataSection(title: "Top Level", icon: "list.bullet.indent",
+                                                 items: [ImageMetadataItem(label: "Items", value: shown + more)]))
+        }
+
+        let big = fileEntries.sorted { $0.uncompressed > $1.uncompressed }.prefix(5).filter { $0.uncompressed > 0 }
+        if !big.isEmpty {
+            sections.append(ImageMetadataSection(title: "Largest Files", icon: "arrow.up.right.square",
+                                                 items: big.map { ImageMetadataItem(label: shortBytes($0.uncompressed), value: $0.name) }))
+        }
+
+        return FolderMetadataReport(
+            kind: .archive,
+            name: url.lastPathComponent,
+            badges: [count(fileEntries.count, "file"), shortBytes(archiveSize), "→ " + shortBytes(uncompressed)],
+            sections: sections,
+            isPartial: false,
+            errorMessage: nil
+        )
+    }
+}
+
+// MARK: - Folder / Archive Inspector Window
+
+public struct FolderInspectorView: View {
+    public let sourceURL: URL
+    public var onPerform: ((FolderAction) -> Void)?
+    public var onClose: () -> Void
+
+    @State private var report: FolderMetadataReport?
+    @State private var icon: NSImage?
+    @State private var loadTask: Task<Void, Never>?
+    @State private var copied = false
+
+    @ObservedObject private var theme = ThemeManager.shared
+
+    public init(sourceURL: URL, onPerform: ((FolderAction) -> Void)? = nil, onClose: @escaping () -> Void) {
+        self.sourceURL = sourceURL
+        self.onPerform = onPerform
+        self.onClose = onClose
+    }
+
+    private var isArchive: Bool { FileCategory.detect(from: sourceURL) == .archive }
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                Text(isArchive ? "Archive Inspector" : "Folder Inspector")
+                    .font(.system(size: 14, weight: .bold))
+                HStack {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .frame(width: 24, height: 24)
+                            .background(Circle().fill(Color.black.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                }
+            }
+            .padding(14)
+            .background(WindowDragHandle())
+
+            // Summary card
+            HStack(spacing: 12) {
+                if let icon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: 58, height: 58)
+                } else {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.primary.opacity(0.06))
+                        .frame(width: 58, height: 58)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(sourceURL.lastPathComponent)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    HStack(spacing: 6) {
+                        badge(text: isArchive ? "ZIP" : "FOLDER", isAccent: true)
+                        ForEach(report?.badges ?? [], id: \.self) { badge(text: $0, isAccent: false) }
+                    }
+                }
+                Spacer()
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+
+            if report?.isPartial == true {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
+                    Text("Very large folder — showing the first \(FolderMetadataReport.scanItemLimit.formatted()) items")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.10)))
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            }
+
+            if let report {
+                if let message = report.errorMessage {
+                    Spacer()
+                    Text(message)
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(24)
+                    Spacer()
+                } else {
+                    ScrollView(.vertical, showsIndicators: true) {
+                        VStack(spacing: 12) {
+                            ForEach(report.sections) { sectionView($0) }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 12)
+                    }
+                }
+            } else {
+                Spacer()
+                VStack(spacing: 10) {
+                    ProgressView().controlSize(.regular)
+                    Text(isArchive ? "Reading archive…" : "Scanning folder…")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            }
+
+            Divider().opacity(0.4)
+
+            HStack(spacing: 10) {
+                footerButton(icon: copied ? "checkmark" : "doc.on.doc", title: copied ? "Copied!" : "Copy All Info", action: copyToClipboard)
+                    .disabled(report == nil || report?.errorMessage != nil)
+                footerButton(icon: "folder", title: "Show in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([sourceURL])
+                }
+                Spacer()
+                Button {
+                    onPerform?(isArchive ? .unzip : .zip)
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: isArchive ? FolderAction.unzip.systemIcon : FolderAction.zip.systemIcon)
+                        Text(isArchive ? "Unzip" : "Zip Folder")
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .padding(.horizontal, 14).padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(theme.accent))
+                    .foregroundColor(theme.currentTheme == .monochrome ? .black : .white)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(14)
+        }
+        .frame(width: 520, height: 620)
+        .background(LiquidWindowBackground())
+        .onExitCommand(perform: onClose)
+        .onAppear {
+            let fileIcon = NSWorkspace.shared.icon(forFile: sourceURL.path)
+            fileIcon.size = NSSize(width: 58, height: 58)
+            icon = fileIcon
+            startLoading()
+        }
+        .onDisappear {
+            loadTask?.cancel()
+            loadTask = nil
+            report = nil
+            icon = nil
+            MemoryOptimizer.reclaimMemory()
+        }
+    }
+
+    private func startLoading() {
+        let url = sourceURL
+        let archive = isArchive
+        loadTask = Task.detached(priority: .userInitiated) {
+            let result = archive
+                ? FolderMetadataReport.loadArchive(at: url, isCancelled: { Task.isCancelled })
+                : FolderMetadataReport.loadFolder(at: url, isCancelled: { Task.isCancelled })
+            if Task.isCancelled { return }
+            await MainActor.run { report = result }
+        }
+    }
+
+    private func copyToClipboard() {
+        guard let report else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(report.fullTextSummary, forType: .string)
+        withAnimation { copied = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            withAnimation { copied = false }
+        }
+    }
+
+    @ViewBuilder
+    private func footerButton(icon: String, title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                Text(title)
+            }
+            .font(.system(size: 12, weight: .medium))
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.08)))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func badge(text: String, isAccent: Bool) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .medium, design: .monospaced))
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(RoundedRectangle(cornerRadius: 4).fill(isAccent ? theme.accent.opacity(0.15) : Color.primary.opacity(0.06)))
+            .foregroundColor(isAccent ? theme.accent : .secondary)
+            .lineLimit(1)
+    }
+
+    @ViewBuilder
+    private func sectionView(_ section: ImageMetadataSection) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: section.icon)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(theme.accent)
+                Text(section.title)
+                    .font(.system(size: 12, weight: .bold))
+                Spacer()
+            }
+
+            VStack(spacing: 4) {
+                ForEach(section.items) { item in
+                    HStack(alignment: .top) {
+                        Text(item.label)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .frame(width: 100, alignment: .leading)
+                        Spacer(minLength: 8)
+                        Text(item.value)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.primary)
+                            .multilineTextAlignment(.trailing)
+                            .textSelection(.enabled)
+                    }
+                    if item.id != section.items.last?.id {
+                        Divider().opacity(0.2)
+                    }
+                }
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.035)))
+        }
+    }
+}
+
+// MARK: - Window Dragging
+
+/// An invisible AppKit view that lets the user drag the window by it, exactly like a native title bar.
+/// SwiftUI's hosting view doesn't reliably forward background drags, so this performs the drag explicitly.
+struct WindowDragHandle: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { DragView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    final class DragView: NSView {
+        override var mouseDownCanMoveWindow: Bool { true }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override func mouseDown(with event: NSEvent) {
+            if let window { window.performDrag(with: event) } else { super.mouseDown(with: event) }
+        }
+    }
 }
 
 // MARK: - 4. Radial Pie Menu View & Geometry
@@ -1521,6 +2326,7 @@ public struct CropEditorView: View {
                 }
             }
             .padding(14)
+            .background(WindowDragHandle())
 
             GeometryReader { geo in
                 if let img = nsImage {
@@ -1711,6 +2517,7 @@ public struct BackgroundEditorView: View {
                 }
             }
             .padding(14)
+            .background(WindowDragHandle())
 
             canvasView(size: CGSize(width: 440, height: 280))
                 .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -2187,6 +2994,7 @@ public struct MetadataInspectorView: View {
                 }
             }
             .padding(14)
+            .background(WindowDragHandle())
 
             // File summary card
             HStack(spacing: 12) {
@@ -2493,6 +3301,7 @@ public struct ThemeSettingsView: View {
                 }
             }
             .padding(14)
+            .background(WindowDragHandle())
 
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 18) {
@@ -2842,9 +3651,9 @@ public final class AppCoordinator: ObservableObject {
     public func pickFileAndShowWheel(mode: WheelMode) {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
-        panel.canChooseDirectories = false
+        panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.message = "Choose a file to test the OpenTangerine radial menu"
+        panel.message = "Choose a file or folder to test the OpenTangerine radial menu"
         panel.prompt = "Select"
         if panel.runModal() == .OK, let url = panel.url {
             showWheel(for: [url], mode: mode, at: NSEvent.mouseLocation, interaction: .click)
@@ -2884,6 +3693,15 @@ public final class AppCoordinator: ObservableObject {
                 for url in urls {
                     self.execute(slice.action, for: url)
                 }
+            case .folderAction(let action):
+                switch action {
+                case .info:
+                    if let first = urls.first {
+                        self.execute(slice.action, for: first)
+                    }
+                case .zip, .unzip:
+                    self.runFolderJob(action, for: urls)
+                }
             }
         }
         state.onDismiss = { [weak self] in
@@ -2892,7 +3710,6 @@ public final class AppCoordinator: ObservableObject {
 
         if let existing = self.wheelPanel {
             existing.orderOut(nil)
-            existing.contentView = nil
             existing.close()
             self.wheelPanel = nil
         }
@@ -2946,13 +3763,6 @@ public final class AppCoordinator: ObservableObject {
             guard let self else { return }
             if let panel = self.wheelPanel {
                 panel.orderOut(nil)
-                if let container = panel.contentView {
-                    for v in container.subviews {
-                        v.removeFromSuperview()
-                    }
-                }
-                panel.contentView = nil
-                panel.isReleasedWhenClosed = true
                 panel.close()
                 self.wheelPanel = nil
             }
@@ -3025,6 +3835,75 @@ public final class AppCoordinator: ObservableObject {
                     onClose: { [weak self] in self?.closeEditor() }
                 ), size: CGSize(width: 520, height: 620))
             }
+
+        case .folderAction(let action):
+            switch action {
+            case .info:
+                statusMessage = "Inspecting folder: \(fileURL.lastPathComponent)"
+                openEditor(FolderInspectorView(
+                    sourceURL: fileURL,
+                    onPerform: { [weak self] subAction in
+                        self?.closeEditor()
+                        self?.runFolderJob(subAction, for: [fileURL])
+                    },
+                    onClose: { [weak self] in self?.closeEditor() }
+                ), size: CGSize(width: 520, height: 620))
+
+            case .zip, .unzip:
+                runFolderJob(action, for: [fileURL])
+            }
+        }
+    }
+
+    public func runFolderJob(_ action: FolderAction, for urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        let total = urls.count
+        let verb = action == .zip ? "Zipping" : "Extracting"
+        statusMessage = total == 1 ? "\(verb) \(urls[0].lastPathComponent)…" : "\(verb) \(total) items…"
+
+        Task.detached(priority: .userInitiated) {
+            var successes: [URL] = []
+            var lastError: String?
+
+            for url in urls {
+                autoreleasepool {
+                    do {
+                        let result: FolderArchiveResult
+                        switch action {
+                        case .zip:
+                            result = try FolderArchiveEngine.shared.zipFolder(at: url)
+                        case .unzip:
+                            result = try FolderArchiveEngine.shared.unzipArchive(at: url)
+                        case .info:
+                            return
+                        }
+                        successes.append(result.output)
+                    } catch {
+                        lastError = error.localizedDescription
+                    }
+                }
+            }
+
+            let finalSuccesses = successes
+            let finalError = lastError
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if !finalSuccesses.isEmpty {
+                    if finalSuccesses.count == 1 {
+                        let name = finalSuccesses[0].lastPathComponent
+                        self.statusMessage = action == .zip ? "Created \(name)" : "Extracted \(name)"
+                    } else {
+                        self.statusMessage = "\(action == .zip ? "Zipped" : "Extracted") \(finalSuccesses.count) items"
+                    }
+                    NSWorkspace.shared.activateFileViewerSelecting(finalSuccesses)
+                }
+                if let err = finalError, finalSuccesses.isEmpty {
+                    self.statusMessage = "Failed: \(err)"
+                    self.showNotification(title: action == .zip ? "Zip Failed" : "Unzip Failed", message: err)
+                }
+                MemoryOptimizer.reclaimMemory()
+            }
         }
     }
 
@@ -3041,14 +3920,7 @@ public final class AppCoordinator: ObservableObject {
         editorWindow = nil
         editorWindowDelegate = nil
         win.delegate = nil
-        if let cv = win.contentView {
-            for v in cv.subviews {
-                v.removeFromSuperview()
-            }
-        }
-        win.contentView = nil
         win.orderOut(nil)
-        win.isReleasedWhenClosed = true
         win.close()
         MemoryOptimizer.reclaimMemory()
     }
@@ -3216,6 +4088,16 @@ public struct OpenTangerineApp: App {
             coord.closeEditor()
             print("  ✓ Idempotent settings re-opening: OK")
 
+            // Test wheel open / hide lifecycle with runloop drain to guarantee zero ARC double-free crashes
+            coord.showWheel(for: [URL(fileURLWithPath: "/tmp")], mode: .convert, at: CGPoint(x: 300, y: 300), interaction: .click)
+            coord.hideWheel()
+            // Allow hideWheel timer (0.18s) to fire and runloop autorelease pool to pop
+            RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+            coord.showWheel(for: [URL(fileURLWithPath: "/tmp")], mode: .tools, at: CGPoint(x: 300, y: 300), interaction: .click)
+            coord.hideWheel()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+            print("  ✓ Wheel open/hide lifecycle across multiple runloop turns: OK")
+
             let tempDir = FileManager.default.temporaryDirectory
             let testImgURL = tempDir.appendingPathComponent("test_img.png")
             let img = NSImage(size: NSSize(width: 80, height: 80))
@@ -3239,6 +4121,69 @@ public struct OpenTangerineApp: App {
             coord.openSettings()
             coord.closeEditor()
             print("  ✓ Metadata inspector open/close/switch: OK")
+
+            // Folder & Archive tests
+            let testFolder = tempDir.appendingPathComponent("ot_test_folder_\(UUID().uuidString.prefix(6))", isDirectory: true)
+            let testSubFolder = testFolder.appendingPathComponent("sub", isDirectory: true)
+            try? FileManager.default.createDirectory(at: testSubFolder, withIntermediateDirectories: true)
+            let file1 = testFolder.appendingPathComponent("hello.txt")
+            let file2 = testSubFolder.appendingPathComponent("nested.png")
+            try? "Hello OpenTangerine".write(to: file1, atomically: true, encoding: .utf8)
+            try? FileManager.default.copyItem(at: testImgURL, to: file2)
+
+            // Category detection tests: photos must NOT be folders, folders must be .folder
+            assert(FileCategory.detect(from: testImgURL) == .image, "Image must be detected as .image")
+            assert(FileCategory.detect(from: testFolder) == .folder, "Folder must be detected as .folder")
+
+            // Wheel configuration exclusivity:
+            let imgConfigConvert = RadialMenuConfiguration.build(for: testImgURL, mode: .convert)
+            let imgConfigTools = RadialMenuConfiguration.build(for: testImgURL, mode: .tools)
+            assert(!imgConfigConvert.outerSlices.contains { if case .folderAction = $0.action { return true }; return false }, "Image convert wheel must not have folder actions")
+            assert(!imgConfigTools.outerSlices.contains { if case .folderAction = $0.action { return true }; return false }, "Image tools wheel must not have folder actions")
+
+            let folderConfigConvert = RadialMenuConfiguration.build(for: testFolder, mode: .convert)
+            let folderConfigTools = RadialMenuConfiguration.build(for: testFolder, mode: .tools)
+            assert(folderConfigConvert.outerSlices.count == 1 && folderConfigConvert.outerSlices[0].title == "ZIP", "Folder convert wheel must only have ZIP")
+            assert(folderConfigTools.outerSlices.count == 2 && folderConfigTools.outerSlices.map(\.title).contains("ZIP") && folderConfigTools.outerSlices.map(\.title).contains("INFO"), "Folder tools wheel must have ZIP and INFO")
+            print("  ✓ Wheel action exclusivity (folders vs photos): OK")
+
+            // Folder scan test
+            let folderReport = FolderMetadataReport.loadFolder(at: testFolder)
+            assert(!folderReport.sections.isEmpty)
+            assert(folderReport.kind == .folder)
+            print("  ✓ Folder metadata scan: OK (\(folderReport.badges.joined(separator: ", ")))")
+
+            // Zip test
+            let zipResult = try! FolderArchiveEngine.shared.zipFolder(at: testFolder)
+            assert(FileManager.default.fileExists(atPath: zipResult.output.path))
+            assert(FileCategory.detect(from: zipResult.output) == .archive)
+            print("  ✓ Folder zipping via ditto streaming: OK (\(zipResult.output.lastPathComponent))")
+
+            // Zip inspect test
+            let archiveReport = FolderMetadataReport.loadArchive(at: zipResult.output)
+            assert(archiveReport.kind == .archive)
+            assert(!archiveReport.sections.isEmpty)
+            print("  ✓ ZIP archive metadata extraction: OK (\(archiveReport.badges.joined(separator: ", ")))")
+
+            // Unzip test
+            let unzipResult = try! FolderArchiveEngine.shared.unzipArchive(at: zipResult.output)
+            assert(FileManager.default.fileExists(atPath: unzipResult.output.path))
+            print("  ✓ ZIP archive unzipping: OK (\(unzipResult.output.lastPathComponent))")
+
+            // Inspector UI test
+            coord.execute(.folderAction(.info), for: testFolder)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            coord.closeEditor()
+            coord.execute(.folderAction(.info), for: zipResult.output)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            coord.closeEditor()
+            print("  ✓ Folder & Archive inspector open/close lifecycle: OK")
+
+            // Clean up test items
+            try? FileManager.default.removeItem(at: testFolder)
+            try? FileManager.default.removeItem(at: zipResult.output)
+            try? FileManager.default.removeItem(at: unzipResult.output)
+            try? FileManager.default.removeItem(at: testImgURL)
 
             print("==> ALL STABILITY TESTS PASSED WITH ZERO CRASHES! 🎉")
             exit(0)
