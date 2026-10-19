@@ -20,6 +20,47 @@ import AVFoundation
 import Combine
 import Darwin
 
+// MARK: - Memory Optimization & Active Cache Pruning
+
+public enum MemoryOptimizer {
+    /// Return the current physical memory footprint of this process in Megabytes.
+    public static var currentFootprintMB: Double {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let kerr = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return kerr == KERN_SUCCESS ? Double(info.phys_footprint) / (1024 * 1024) : 0
+    }
+
+    /// Aggressively reclaims unused heap pages, flushes CoreAnimation transactions,
+    /// purges ColorSync CMS tables and purgeable malloc zones, and resets temporary caches.
+    @MainActor
+    public static func reclaimMemory() {
+        autoreleasepool {
+            CATransaction.flush()
+            URLCache.shared.removeAllCachedResponses()
+            if let pz = malloc_default_purgeable_zone() {
+                _ = malloc_zone_pressure_relief(pz, 0)
+            }
+            _ = malloc_zone_pressure_relief(nil, 0)
+        }
+
+        // Run second pass after the runloop completes the current turn and drains autorelease pools
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            autoreleasepool {
+                CATransaction.flush()
+                if let pz = malloc_default_purgeable_zone() {
+                    _ = malloc_zone_pressure_relief(pz, 0)
+                }
+                _ = malloc_zone_pressure_relief(nil, 0)
+            }
+        }
+    }
+}
+
 // MARK: - 1. Models & Radial Menu Configuration
 
 public enum WheelMode: String, CaseIterable {
@@ -466,7 +507,8 @@ public final class FileConversionEngine: @unchecked Sendable {
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: max(width, height, 1),
-            kCGImageSourceShouldCacheImmediately: true
+            kCGImageSourceShouldCache: false,
+            kCGImageSourceShouldCacheImmediately: false
         ]
         guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
                 ?? CGImageSourceCreateImageAtIndex(source, 0, nil) else {
@@ -1023,7 +1065,9 @@ public final class WheelState: ObservableObject {
         self.mode = mode
         self.interaction = interaction
         self.config = RadialMenuConfiguration.build(for: fileURLs[0], mode: mode)
-        self.fileIcon = NSWorkspace.shared.icon(forFile: fileURLs[0].path)
+        let icon = NSWorkspace.shared.icon(forFile: fileURLs[0].path)
+        icon.size = NSSize(width: 32, height: 32)
+        self.fileIcon = icon
     }
 
     public var hoveredSlice: RadialSlice? {
@@ -1570,14 +1614,34 @@ public struct CropEditorView: View {
         .background(LiquidWindowBackground())
         .onExitCommand(perform: onClose)
         .onAppear {
-            if let img = NSImage(contentsOf: sourceURL) {
-                nsImage = img
-                if let rep = img.representations.first, rep.pixelsWide > 0 {
-                    naturalPixelSize = CGSize(width: rep.pixelsWide, height: rep.pixelsHigh)
-                }
-                syncDimensions()
+            loadPreviewImage()
+        }
+        .onDisappear {
+            nsImage = nil
+            MemoryOptimizer.reclaimMemory()
+        }
+    }
+
+    private func loadPreviewImage() {
+        guard let src = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+              CGImageSourceGetCount(src) > 0 else { return }
+        if let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
+            let w = props[kCGImagePropertyPixelWidth] as? Int ?? 0
+            let h = props[kCGImagePropertyPixelHeight] as? Int ?? 0
+            if w > 0 && h > 0 {
+                naturalPixelSize = CGSize(width: w, height: h)
             }
         }
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1000,
+            kCGImageSourceShouldCache: false
+        ]
+        if let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) {
+            nsImage = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+        }
+        syncDimensions()
     }
 
     private func syncDimensions() {
@@ -1586,25 +1650,28 @@ public struct CropEditorView: View {
     }
 
     private func applyCrop() {
-        guard let src = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
-              let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return }
-        let rect = CGRect(
-            x: round(normalizedCrop.minX * CGFloat(cg.width)),
-            y: round(normalizedCrop.minY * CGFloat(cg.height)),
-            width: round(normalizedCrop.width * CGFloat(cg.width)),
-            height: round(normalizedCrop.height * CGFloat(cg.height))
-        )
-        guard let cropped = cg.cropping(to: rect) else { return }
-        let ext = sourceURL.pathExtension.isEmpty ? "jpg" : sourceURL.pathExtension
-        let outURL = FileConversionEngine.shared.uniqueOutputURL(
-            in: sourceURL.deletingLastPathComponent(),
-            baseName: sourceURL.deletingPathExtension().lastPathComponent,
-            suffix: "Cropped",
-            ext: ext
-        )
-        if (try? FileConversionEngine.shared.writeCGImage(cropped, to: outURL, format: ext)) != nil {
-            onComplete(outURL)
+        autoreleasepool {
+            guard let src = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+                  let cg = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCache: false] as CFDictionary) else { return }
+            let rect = CGRect(
+                x: round(normalizedCrop.minX * CGFloat(cg.width)),
+                y: round(normalizedCrop.minY * CGFloat(cg.height)),
+                width: round(normalizedCrop.width * CGFloat(cg.width)),
+                height: round(normalizedCrop.height * CGFloat(cg.height))
+            )
+            guard let cropped = cg.cropping(to: rect) else { return }
+            let ext = sourceURL.pathExtension.isEmpty ? "jpg" : sourceURL.pathExtension
+            let outURL = FileConversionEngine.shared.uniqueOutputURL(
+                in: sourceURL.deletingLastPathComponent(),
+                baseName: sourceURL.deletingPathExtension().lastPathComponent,
+                suffix: "Cropped",
+                ext: ext
+            )
+            if (try? FileConversionEngine.shared.writeCGImage(cropped, to: outURL, format: ext)) != nil {
+                onComplete(outURL)
+            }
         }
+        MemoryOptimizer.reclaimMemory()
     }
 }
 
@@ -1697,7 +1764,27 @@ public struct BackgroundEditorView: View {
         .frame(width: 490, height: 610)
         .background(LiquidWindowBackground())
         .onExitCommand(perform: onClose)
-        .onAppear { nsImage = NSImage(contentsOf: sourceURL) }
+        .onAppear {
+            loadPreviewImage()
+        }
+        .onDisappear {
+            nsImage = nil
+            MemoryOptimizer.reclaimMemory()
+        }
+    }
+
+    private func loadPreviewImage() {
+        guard let src = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+              CGImageSourceGetCount(src) > 0 else { return }
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1000,
+            kCGImageSourceShouldCache: false
+        ]
+        if let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) {
+            nsImage = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+        }
     }
 
     @ViewBuilder
@@ -1729,18 +1816,21 @@ public struct BackgroundEditorView: View {
 
     @MainActor
     private func saveComposite() {
-        let renderer = ImageRenderer(content: canvasView(size: CGSize(width: 1600, height: 1100)))
-        renderer.scale = 2.0
-        guard let cg = renderer.cgImage else { return }
-        let outURL = FileConversionEngine.shared.uniqueOutputURL(
-            in: sourceURL.deletingLastPathComponent(),
-            baseName: sourceURL.deletingPathExtension().lastPathComponent,
-            suffix: "with Background",
-            ext: "png"
-        )
-        if (try? FileConversionEngine.shared.writeCGImage(cg, to: outURL, format: "png")) != nil {
-            onComplete(outURL)
+        autoreleasepool {
+            let renderer = ImageRenderer(content: canvasView(size: CGSize(width: 1600, height: 1100)))
+            renderer.scale = 2.0
+            guard let cg = renderer.cgImage else { return }
+            let outURL = FileConversionEngine.shared.uniqueOutputURL(
+                in: sourceURL.deletingLastPathComponent(),
+                baseName: sourceURL.deletingPathExtension().lastPathComponent,
+                suffix: "with Background",
+                ext: "png"
+            )
+            if (try? FileConversionEngine.shared.writeCGImage(cg, to: outURL, format: "png")) != nil {
+                onComplete(outURL)
+            }
         }
+        MemoryOptimizer.reclaimMemory()
     }
 }
 
@@ -2255,6 +2345,11 @@ public struct MetadataInspectorView: View {
             loadMetadata()
             loadThumbnail()
         }
+        .onDisappear {
+            thumbnail = nil
+            report = nil
+            MemoryOptimizer.reclaimMemory()
+        }
     }
 
     @ViewBuilder
@@ -2322,7 +2417,8 @@ public struct MetadataInspectorView: View {
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: 180
+            kCGImageSourceThumbnailMaxPixelSize: 180,
+            kCGImageSourceShouldCache: false
         ]
         if let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) {
             guard cg.width > 0 && cg.height > 0 else { return }
@@ -2695,10 +2791,24 @@ public final class AppCoordinator: ObservableObject {
     private var wheelCenterPoint: CGPoint = .zero
     private var editorWindow: NSWindow?
     private var editorWindowDelegate: EditorWindowDelegate?
+    private var idleMaintenanceTimer: Timer?
 
     public init() {
         setupDragMonitor()
         dragMonitor.startMonitoring()
+        setupIdleMaintenance()
+    }
+
+    private func setupIdleMaintenance() {
+        idleMaintenanceTimer = Timer.scheduledTimer(withTimeInterval: 20.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if self.wheelState == nil && self.editorWindow == nil {
+                    MemoryOptimizer.reclaimMemory()
+                }
+            }
+        }
+        idleMaintenanceTimer?.tolerance = 5.0
     }
 
     private func setupDragMonitor() {
@@ -2780,14 +2890,14 @@ public final class AppCoordinator: ObservableObject {
             self?.hideWheel()
         }
 
-        let panel: WheelPanel
         if let existing = self.wheelPanel {
-            panel = existing
-            panel.setFrame(rect, display: true)
-        } else {
-            panel = WheelPanel(contentRect: rect)
-            self.wheelPanel = panel
+            existing.orderOut(nil)
+            existing.contentView = nil
+            existing.close()
+            self.wheelPanel = nil
         }
+        let panel = WheelPanel(contentRect: rect)
+        self.wheelPanel = panel
 
         // Host the interactive SwiftUI wheel view
         let hostingView = NSHostingView(rootView: RadialWheelView(state: state))
@@ -2834,24 +2944,37 @@ public final class AppCoordinator: ObservableObject {
         dragMonitor.endSession()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
             guard let self else { return }
-            self.wheelPanel?.orderOut(nil)
-            self.wheelPanel?.contentView = nil
+            if let panel = self.wheelPanel {
+                panel.orderOut(nil)
+                if let container = panel.contentView {
+                    for v in container.subviews {
+                        v.removeFromSuperview()
+                    }
+                }
+                panel.contentView = nil
+                panel.isReleasedWhenClosed = true
+                panel.close()
+                self.wheelPanel = nil
+            }
             self.wheelState = nil
-            malloc_zone_pressure_relief(nil, 0)
+            MemoryOptimizer.reclaimMemory()
         }
     }
 
     public func execute(_ action: RadialActionType, for fileURL: URL) {
         switch action {
         case .convertToFormat(let ext):
-            do {
-                let outURL = try FileConversionEngine.shared.convertFile(at: fileURL, to: ext)
-                statusMessage = "Saved \(outURL.lastPathComponent)"
-                NSWorkspace.shared.activateFileViewerSelecting([outURL])
-            } catch {
-                statusMessage = "Failed: \(error.localizedDescription)"
-                showNotification(title: "Conversion Error", message: error.localizedDescription)
+            autoreleasepool {
+                do {
+                    let outURL = try FileConversionEngine.shared.convertFile(at: fileURL, to: ext)
+                    statusMessage = "Saved \(outURL.lastPathComponent)"
+                    NSWorkspace.shared.activateFileViewerSelecting([outURL])
+                } catch {
+                    statusMessage = "Failed: \(error.localizedDescription)"
+                    showNotification(title: "Conversion Error", message: error.localizedDescription)
+                }
             }
+            MemoryOptimizer.reclaimMemory()
 
         case .openTool(let tool):
             switch tool {
@@ -2878,15 +3001,18 @@ public final class AppCoordinator: ObservableObject {
                 ), size: CGSize(width: 490, height: 610))
 
             case .compress:
-                do {
-                    let result = try FileConversionEngine.shared.compressImage(at: fileURL)
-                    let saved = RadialMenuConfiguration.formattedByteCount(result.originalBytes - result.newBytes)
-                    statusMessage = "Compressed: saved \(saved)"
-                    NSWorkspace.shared.activateFileViewerSelecting([result.output])
-                } catch {
-                    statusMessage = error.localizedDescription
-                    showNotification(title: "Compress Image", message: error.localizedDescription)
+                autoreleasepool {
+                    do {
+                        let result = try FileConversionEngine.shared.compressImage(at: fileURL)
+                        let saved = RadialMenuConfiguration.formattedByteCount(result.originalBytes - result.newBytes)
+                        statusMessage = "Compressed: saved \(saved)"
+                        NSWorkspace.shared.activateFileViewerSelecting([result.output])
+                    } catch {
+                        statusMessage = error.localizedDescription
+                        showNotification(title: "Compress Image", message: error.localizedDescription)
+                    }
                 }
+                MemoryOptimizer.reclaimMemory()
 
             case .metadata:
                 statusMessage = "Inspecting metadata: \(fileURL.lastPathComponent)"
@@ -2915,10 +3041,16 @@ public final class AppCoordinator: ObservableObject {
         editorWindow = nil
         editorWindowDelegate = nil
         win.delegate = nil
+        if let cv = win.contentView {
+            for v in cv.subviews {
+                v.removeFromSuperview()
+            }
+        }
         win.contentView = nil
         win.orderOut(nil)
+        win.isReleasedWhenClosed = true
         win.close()
-        malloc_zone_pressure_relief(nil, 0)
+        MemoryOptimizer.reclaimMemory()
     }
 
     private func openEditor<V: View>(_ view: V, size: CGSize) {
@@ -2988,6 +3120,76 @@ public struct OpenTangerineApp: App {
             }
         }
 
+        if CommandLine.arguments.contains("--test-memory") {
+            print(String(format: "[MemTest] Baseline at launch: %.2f MB", MemoryOptimizer.currentFootprintMB))
+            let coord = AppCoordinator()
+            print(String(format: "[MemTest] After AppCoordinator init: %.2f MB", MemoryOptimizer.currentFootprintMB))
+
+            coord.openSettings()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            print(String(format: "[MemTest] After openSettings: %.2f MB", MemoryOptimizer.currentFootprintMB))
+
+            coord.closeEditor()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+            print(String(format: "[MemTest] After closeEditor (settings): %.2f MB", MemoryOptimizer.currentFootprintMB))
+
+            let tempDir = FileManager.default.temporaryDirectory
+            let testImgURL = tempDir.appendingPathComponent("test_img.png")
+            let img = NSImage(size: NSSize(width: 80, height: 80))
+            img.lockFocus()
+            NSColor.systemOrange.setFill()
+            NSRect(x: 0, y: 0, width: 80, height: 80).fill()
+            img.unlockFocus()
+            if let tiff = img.tiffRepresentation,
+               let rep = NSBitmapImageRep(data: tiff),
+               let png = rep.representation(using: .png, properties: [:]) {
+                try? png.write(to: testImgURL)
+            }
+
+            coord.showWheel(for: [testImgURL], mode: .convert, at: CGPoint(x: 200, y: 200), interaction: .click)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            print(String(format: "[MemTest] After showWheel: %.2f MB", MemoryOptimizer.currentFootprintMB))
+
+            coord.hideWheel()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.55))
+            print(String(format: "[MemTest] After hideWheel: %.2f MB", MemoryOptimizer.currentFootprintMB))
+
+            coord.execute(.openTool(.metadata), for: testImgURL)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            print(String(format: "[MemTest] After open Metadata: %.2f MB", MemoryOptimizer.currentFootprintMB))
+
+            coord.closeEditor()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+            print(String(format: "[MemTest] After close Metadata: %.2f MB", MemoryOptimizer.currentFootprintMB))
+
+            coord.execute(.openTool(.crop), for: testImgURL)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            print(String(format: "[MemTest] After open Crop: %.2f MB", MemoryOptimizer.currentFootprintMB))
+
+            coord.closeEditor()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+            print(String(format: "[MemTest] After close Crop: %.2f MB", MemoryOptimizer.currentFootprintMB))
+
+            coord.execute(.openTool(.addBG), for: testImgURL)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            print(String(format: "[MemTest] After open Backdrop: %.2f MB", MemoryOptimizer.currentFootprintMB))
+
+            coord.closeEditor()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+            print(String(format: "[MemTest] After close Backdrop: %.2f MB", MemoryOptimizer.currentFootprintMB))
+
+            let outURL = try? FileConversionEngine.shared.convertFile(at: testImgURL, to: "jpg")
+            if let outURL {
+                print(String(format: "[MemTest] After convertFile (PNG -> JPG): %.2f MB", MemoryOptimizer.currentFootprintMB))
+                try? FileManager.default.removeItem(at: outURL)
+            }
+
+            MemoryOptimizer.reclaimMemory()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+            print(String(format: "[MemTest] Final resting footprint: %.2f MB", MemoryOptimizer.currentFootprintMB))
+            exit(0)
+        }
+
         if CommandLine.arguments.contains("--test-stability") {
             print("==> Running OpenTangerine Stability Tests…")
             let theme = ThemeManager.shared
@@ -3043,11 +3245,24 @@ public struct OpenTangerineApp: App {
         }
     }
 
+    private static let menuBarIcon: NSImage = {
+        let size = NSSize(width: 28, height: 28)
+        let icon = NSImage(size: size)
+        icon.lockFocus()
+        if let base = NSImage(named: "AppIcon") {
+            base.draw(in: NSRect(origin: .zero, size: size), from: .zero, operation: .sourceOver, fraction: 1.0)
+        } else {
+            NSApp.applicationIconImage.draw(in: NSRect(origin: .zero, size: size), from: .zero, operation: .sourceOver, fraction: 1.0)
+        }
+        icon.unlockFocus()
+        return icon
+    }()
+
     public var body: some Scene {
         MenuBarExtra("OpenTangerine", systemImage: "circle.hexagongrid.fill") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    Image(nsImage: NSImage(named: "AppIcon") ?? NSApp.applicationIconImage)
+                    Image(nsImage: Self.menuBarIcon)
                         .resizable()
                         .frame(width: 28, height: 28)
                     VStack(alignment: .leading, spacing: 2) {
