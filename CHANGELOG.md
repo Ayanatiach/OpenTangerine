@@ -4,6 +4,30 @@ All notable changes to OpenTangerine will be documented in this file.
 
 ---
 
+## [1.0.6] - 2026-10-20
+
+### 🚀 Highlights
+- **Multi-Format Video Transcoding Engine (Shift + Drag)**:
+  - Added full video conversion support to the radial wheel menu when dragging video files in Finder with **Shift (⇧)**.
+  - Supports converting video files to and from: **3GP**, **AVI**, **FLV**, **MKV**, **MOV**, **MP4**, **OGV**, **WEBM**, and **WMV**.
+  - Slices are dynamically generated and filtered to display all other target formats with custom `film` iconography.
+- **Dedicated Video Inspector ("INFO" Wheel Slice)**:
+  - Added dedicated **"INFO"** slice with `info.circle` iconography to both convert and tools wheels for video files, providing seamless continuity with image metadata and folder/archive inspection.
+  - **Comprehensive Technical Breakdown**: Live video frame thumbnail extraction (via FFmpeg piped frame with AVAssetImageGenerator fallback), video codec & profile, resolution, display aspect ratio, nominal frame rate, pixel format, video bitrate, audio codec, audio channels & layout, sample rate, duration, and container format specs.
+  - Quick action buttons to **"Copy All Info"**, **"Show in Finder"**, and **"Open in Player"**.
+- **Dual-Engine Architecture (FFmpeg + Apple AVFoundation)**:
+  - **FFmpeg Integration**: Automatic discovery of system FFmpeg & FFprobe (`/opt/homebrew`, `/usr/local`, `~/.local/bin`, or `PATH`) enabling full container and codec support (H.264, VP9, Theora, Sorenson Spark FLV, WMV2, AAC, Opus, MP3).
+  - **AVFoundation Native Fallback**: 100% offline fallback for standard macOS formats (MP4, MOV, 3GP) using Apple's `AVAssetExportSession` when FFmpeg is not installed.
+  - **Odd-Dimension Safe Scaling**: Automatically applies dimension normalization filter (`scale=trunc(iw/2)*2:trunc(ih/2)*2`) to prevent video encoder crashes on odd-dimension crops or screen recordings.
+- **Asynchronous & Non-Blocking Workflow**:
+  - Video conversions process on background threads with real-time menu bar status (`Converting video.mp4 → WEBM…`), system notifications upon completion, and Finder selection.
+- **Settings & Appearance Integration**:
+  - Added **Video Conversion Engine** card in **Theme & Appearance Settings (`⌘,`)** displaying active engine status (`FFMPEG READY` vs `AVFOUNDATION`), detected binary path, and quick copy command for `brew install ffmpeg`.
+- **Command-Line Interface (CLI)**:
+  - Direct video conversions via `swift run -c release OpenTangerine --convert <format> <video-file>`.
+
+---
+
 ## [1.0.5] - 2026-10-19
 
 ### 🚀 Highlights

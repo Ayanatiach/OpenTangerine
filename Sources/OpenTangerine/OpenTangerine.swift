@@ -100,7 +100,7 @@ public enum FileCategory: String {
             return .pdf
         case "jpg", "jpeg", "png", "webp", "heic", "heif", "tiff", "tif", "bmp", "gif", "avif":
             return .image
-        case "mp4", "mov", "mkv", "avi", "webm", "m4v":
+        case "mp4", "mov", "mkv", "avi", "webm", "wmv", "flv", "3gp", "3g2", "ogv", "m4v", "ts", "mts", "m2ts", "vob", "divx", "asf", "mpg", "mpeg", "f4v":
             return .video
         case "mp3", "m4a", "wav", "flac", "aac", "ogg", "aiff":
             return .audio
@@ -113,13 +113,18 @@ public enum FileCategory: String {
         }
     }
 
-    /// Canonical spelling so "jpeg"/"jpg", "tif"/"tiff", "heif"/"heic" compare equal.
+    /// Canonical spelling so "jpeg"/"jpg", "tif"/"tiff", "heif"/"heic", "3gpp"/"3gp", "m4v"/"mp4" compare equal.
     public static func normalizedExtension(_ ext: String) -> String {
         switch ext.lowercased() {
         case "jpeg": return "jpg"
         case "tif": return "tiff"
         case "heif": return "heic"
         case "htm": return "html"
+        case "3gpp", "3g2": return "3gp"
+        case "f4v": return "flv"
+        case "asf": return "wmv"
+        case "qt": return "mov"
+        case "m4v": return "mp4"
         default: return ext.lowercased()
         }
     }
@@ -129,6 +134,7 @@ public enum RadialActionType: Equatable {
     case convertToFormat(String)
     case openTool(ToolKind)
     case folderAction(FolderAction)
+    case inspectVideo
 }
 
 /// Actions that only apply to folders (zip / info) and ZIP archives (unzip / info).
@@ -200,7 +206,7 @@ public struct RadialSlice: Identifiable, Equatable {
 
     public var isTool: Bool {
         switch action {
-        case .openTool, .folderAction: return true
+        case .openTool, .folderAction, .inspectVideo: return true
         case .convertToFormat: return false
         }
     }
@@ -239,13 +245,18 @@ public struct RadialMenuConfiguration {
                 targets = ["PNG", "JPG", "HEIC", "PDF", "TIFF", "AVIF", "BMP", "DOCX"]
             case .document:
                 targets = ["TXT", "RTF", "DOCX", "HTML"]
+            case .video:
+                targets = ["MP4", "MOV", "WEBM", "MKV", "AVI", "WMV", "FLV", "3GP", "OGV"]
             default:
                 targets = []
             }
-            let slices = targets
+            var slices = targets
                 .filter { FileCategory.normalizedExtension($0) != currentExt }
                 .filter { FileConversionEngine.shared.canConvert(category, to: $0.lowercased()) }
                 .map { RadialSlice(title: $0, systemIcon: Self.icon(forFormat: $0), action: .convertToFormat($0.lowercased())) }
+            if category == .video {
+                slices.append(RadialSlice(title: "INFO", systemIcon: "info.circle", hint: "Inspect video specs", action: .inspectVideo))
+            }
             return RadialMenuConfiguration(
                 outerSlices: slices,
                 centerSubtitle: fileSizeString,
@@ -253,6 +264,15 @@ public struct RadialMenuConfiguration {
             )
 
         case .tools:
+            if category == .video {
+                return RadialMenuConfiguration(
+                    outerSlices: [
+                        RadialSlice(title: "INFO", systemIcon: "info.circle", hint: "Inspect video specs", action: .inspectVideo)
+                    ],
+                    centerSubtitle: fileSizeString,
+                    emptyMessage: nil
+                )
+            }
             guard category == .image else {
                 return RadialMenuConfiguration(outerSlices: [], centerSubtitle: fileSizeString, emptyMessage: "Tools work on images")
             }
@@ -267,12 +287,13 @@ public struct RadialMenuConfiguration {
     }
 
     static func icon(forFormat format: String) -> String {
-        switch format {
+        switch format.uppercased() {
         case "PDF": return "doc.richtext"
         case "DOCX": return "doc.text"
         case "TXT": return "text.alignleft"
         case "RTF": return "textformat"
         case "HTML": return "chevron.left.forwardslash.chevron.right"
+        case "MP4", "MOV", "WEBM", "MKV", "AVI", "WMV", "FLV", "3GP", "OGV": return "film"
         default: return "photo"
         }
     }
@@ -469,6 +490,8 @@ public final class FileConversionEngine: @unchecked Sendable {
             return Self.canEncode(ext)
         case (.document, "txt"), (.document, "rtf"), (.document, "docx"), (.document, "html"):
             return true
+        case (.video, _):
+            return VideoConversionEngine.shared.canConvert(to: ext)
         default:
             return false
         }
@@ -502,6 +525,8 @@ public final class FileConversionEngine: @unchecked Sendable {
                 try convertImageFormat(sourceURL: sourceURL, destinationURL: destinationURL, format: ext)
             case (.document, _):
                 try convertDocument(sourceURL: sourceURL, destinationURL: destinationURL, format: ext)
+            case (.video, _):
+                try VideoConversionEngine.shared.convertVideo(sourceURL: sourceURL, destinationURL: destinationURL, format: ext)
             default:
                 throw ConversionError.unsupportedConversion("\(sourceURL.pathExtension) -> \(ext)")
             }
@@ -1015,45 +1040,11 @@ public final class FolderArchiveEngine: @unchecked Sendable {
         return candidate
     }
 
-    struct ProcessOutput {
-        let status: Int32
-        let stdout: Data
-        let stderr: String
-    }
-
-    private final class DataBox: @unchecked Sendable { var data = Data() }
+    typealias ProcessOutput = OpenTangerine.ProcessOutput
 
     /// Runs a tool and collects stdout/stderr without risking a full-pipe deadlock.
     static func run(_ launchPath: String, _ arguments: [String]) throws -> ProcessOutput {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: launchPath)
-        process.arguments = arguments
-        let outPipe = Pipe(), errPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = errPipe
-        process.standardInput = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            throw ConversionError.archiveFailed("Couldn't launch \(URL(fileURLWithPath: launchPath).lastPathComponent): \(error.localizedDescription)")
-        }
-
-        let errBox = DataBox()
-        let group = DispatchGroup()
-        group.enter()
-        DispatchQueue.global(qos: .utility).async {
-            errBox.data = errPipe.fileHandleForReading.readDataToEndOfFile()
-            group.leave()
-        }
-        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        group.wait()
-        process.waitUntilExit()
-
-        return ProcessOutput(
-            status: process.terminationStatus,
-            stdout: outData,
-            stderr: String(decoding: errBox.data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        )
+        try ProcessRunner.run(launchPath, arguments)
     }
 }
 
@@ -3892,6 +3883,82 @@ public struct ThemeSettingsView: View {
                         .padding(12)
                         .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
                     }
+
+                    // 3. Video Transcoding Engine Section
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "film")
+                                .foregroundColor(theme.accent)
+                            Text("Video Conversion Engine")
+                                .font(.system(size: 13, weight: .bold))
+                            Spacer()
+                            if FFmpegDiscovery.isAvailable {
+                                Text("FFMPEG READY")
+                                    .font(.system(size: 9, weight: .heavy, design: .monospaced))
+                                    .padding(.horizontal, 6).padding(.vertical, 2)
+                                    .background(Capsule().fill(Color.green.opacity(0.18)))
+                                    .foregroundColor(.green)
+                            } else {
+                                Text("AVFOUNDATION")
+                                    .font(.system(size: 9, weight: .heavy, design: .monospaced))
+                                    .padding(.horizontal, 6).padding(.vertical, 2)
+                                    .background(Capsule().fill(Color.orange.opacity(0.18)))
+                                    .foregroundColor(.orange)
+                            }
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(FFmpegDiscovery.isAvailable
+                                 ? "FFmpeg is active for full-spectrum video transcoding."
+                                 : "Apple AVFoundation is active for basic offline encoding (MP4, MOV, 3GP).")
+                                .font(.system(size: 12, weight: .medium))
+
+                            Text("Supported Formats: 3GP, AVI, FLV, MKV, MOV, MP4, OGV, WEBM, and WMV")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+
+                            if let path = FFmpegDiscovery.resolvePath() {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.green)
+                                        .font(.system(size: 11))
+                                    Text(path)
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                .padding(.top, 2)
+                            } else {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "exclamationmark.triangle.fill")
+                                            .foregroundColor(.orange)
+                                            .font(.system(size: 11))
+                                        Text("Install FFmpeg to enable AVI, FLV, MKV, OGV, WEBM, and WMV:")
+                                            .font(.system(size: 11))
+                                            .foregroundColor(.secondary)
+                                    }
+                                    HStack {
+                                        Text("brew install ffmpeg")
+                                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                            .padding(.horizontal, 8).padding(.vertical, 4)
+                                            .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.06)))
+
+                                        Button("Copy Command") {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString("brew install ffmpeg", forType: .string)
+                                        }
+                                        .font(.system(size: 11))
+                                        .buttonStyle(.link)
+                                    }
+                                }
+                                .padding(.top, 2)
+                            }
+                        }
+                        .padding(12)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
+                    }
                 }
                 .padding(16)
             }
@@ -4096,7 +4163,7 @@ public final class AppUpdateService: ObservableObject {
         if let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, !v.isEmpty {
             return v
         }
-        return "1.0.5"
+        return "1.0.6"
     }
 
     @Published public var state: UpdateState = .idle
@@ -4736,7 +4803,7 @@ public final class AppCoordinator: ObservableObject {
             guard let self else { return }
             self.hideWheel()
             switch slice.action {
-            case .openTool:
+            case .openTool, .inspectVideo:
                 if let first = urls.first {
                     self.execute(slice.action, for: first)
                 }
@@ -4827,17 +4894,43 @@ public final class AppCoordinator: ObservableObject {
     public func execute(_ action: RadialActionType, for fileURL: URL) {
         switch action {
         case .convertToFormat(let ext):
-            autoreleasepool {
-                do {
-                    let outURL = try FileConversionEngine.shared.convertFile(at: fileURL, to: ext)
-                    statusMessage = "Saved \(outURL.lastPathComponent)"
-                    NSWorkspace.shared.activateFileViewerSelecting([outURL])
-                } catch {
-                    statusMessage = "Failed: \(error.localizedDescription)"
-                    showNotification(title: "Conversion Error", message: error.localizedDescription)
+            let isVideo = FileCategory.detect(from: fileURL) == .video
+            if isVideo {
+                statusMessage = "Converting \(fileURL.lastPathComponent) → \(ext.uppercased())…"
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    autoreleasepool {
+                        do {
+                            let outURL = try FileConversionEngine.shared.convertFile(at: fileURL, to: ext)
+                            DispatchQueue.main.async {
+                                guard let self else { return }
+                                self.statusMessage = "Saved \(outURL.lastPathComponent)"
+                                self.showNotification(title: "Video Converted", message: "Saved \(outURL.lastPathComponent)")
+                                NSWorkspace.shared.activateFileViewerSelecting([outURL])
+                                MemoryOptimizer.reclaimMemory()
+                            }
+                        } catch {
+                            DispatchQueue.main.async {
+                                guard let self else { return }
+                                self.statusMessage = "Failed: \(error.localizedDescription)"
+                                self.showNotification(title: "Conversion Error", message: error.localizedDescription)
+                                MemoryOptimizer.reclaimMemory()
+                            }
+                        }
+                    }
                 }
+            } else {
+                autoreleasepool {
+                    do {
+                        let outURL = try FileConversionEngine.shared.convertFile(at: fileURL, to: ext)
+                        statusMessage = "Saved \(outURL.lastPathComponent)"
+                        NSWorkspace.shared.activateFileViewerSelecting([outURL])
+                    } catch {
+                        statusMessage = "Failed: \(error.localizedDescription)"
+                        showNotification(title: "Conversion Error", message: error.localizedDescription)
+                    }
+                }
+                MemoryOptimizer.reclaimMemory()
             }
-            MemoryOptimizer.reclaimMemory()
 
         case .openTool(let tool):
             switch tool {
@@ -4916,6 +5009,13 @@ public final class AppCoordinator: ObservableObject {
             case .zip, .unzip:
                 runFolderJob(action, for: [fileURL])
             }
+
+        case .inspectVideo:
+            statusMessage = "Inspecting video: \(fileURL.lastPathComponent)"
+            openEditor(VideoInspectorView(
+                sourceURL: fileURL,
+                onClose: { [weak self] in self?.closeEditor() }
+            ), size: CGSize(width: 520, height: 640))
         }
     }
 
@@ -5301,7 +5401,55 @@ public struct OpenTangerineApp: App {
             coord.openUpdates()
             RunLoop.current.run(until: Date().addingTimeInterval(0.1))
             coord.closeEditor()
-            print("  ✓ Update inspector window open/close lifecycle: OK")
+            // Video category & conversion stability tests
+            let videoExts = ["3gp", "avi", "flv", "mkv", "mov", "mp4", "ogv", "webm", "wmv"]
+            for ext in videoExts {
+                let dummyURL = tempDir.appendingPathComponent("sample.\(ext)")
+                assert(FileCategory.detect(from: dummyURL) == .video, "Sample .\(ext) must be detected as .video")
+            }
+            let mp4URL = tempDir.appendingPathComponent("ot_test_video.mp4")
+            let sampleGen = Process()
+            if let ffmpegPath = FFmpegDiscovery.resolvePath() {
+                sampleGen.executableURL = URL(fileURLWithPath: ffmpegPath)
+                sampleGen.arguments = ["-nostdin", "-y", "-f", "lavfi", "-i", "testsrc=duration=0.5:size=160x120:rate=10", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.5", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", mp4URL.path]
+                sampleGen.standardOutput = FileHandle.nullDevice
+                sampleGen.standardError = FileHandle.nullDevice
+                try? sampleGen.run()
+                sampleGen.waitUntilExit()
+            }
+            if FileManager.default.fileExists(atPath: mp4URL.path) {
+                let videoConfig = RadialMenuConfiguration.build(for: mp4URL, mode: .convert)
+                assert(videoConfig.outerSlices.count == 9, "MP4 video must offer 8 other formats plus INFO")
+                assert(!videoConfig.outerSlices.map(\.title).contains("MP4"), "MP4 video must not offer MP4 to itself")
+                assert(videoConfig.outerSlices.map(\.title).contains("INFO"), "Video wheel must contain INFO slice")
+                for targetTitle in ["MOV", "WEBM", "MKV", "AVI", "WMV", "FLV", "3GP", "OGV", "INFO"] {
+                    assert(videoConfig.outerSlices.map(\.title).contains(targetTitle), "Video wheel missing \(targetTitle)")
+                }
+                print("  ✓ Video wheel configuration & 9-slice targets (8 formats + INFO): OK")
+
+                let videoToolsConfig = RadialMenuConfiguration.build(for: mp4URL, mode: .tools)
+                assert(videoToolsConfig.outerSlices.count == 1 && videoToolsConfig.outerSlices.first?.title == "INFO", "Video tools wheel must contain INFO")
+                print("  ✓ Video tools wheel configuration: OK")
+
+                // Video metadata extraction & inspector test
+                let videoReport = VideoMetadataReport.load(from: mp4URL)
+                assert(!videoReport.sections.isEmpty, "Video metadata report must not be empty")
+                assert(videoReport.format.uppercased() == "MP4", "Report format should be MP4")
+                coord.execute(.inspectVideo, for: mp4URL)
+                RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+                coord.closeEditor()
+                print("  ✓ Video metadata extraction & VideoInspectorView lifecycle: OK")
+
+                // Test converting to webm and mov
+                let webmOut = try? FileConversionEngine.shared.convertFile(at: mp4URL, to: "webm")
+                assert(webmOut != nil && FileManager.default.fileExists(atPath: webmOut!.path), "MP4 -> WEBM conversion must succeed")
+                let movOut = try? FileConversionEngine.shared.convertFile(at: mp4URL, to: "mov")
+                assert(movOut != nil && FileManager.default.fileExists(atPath: movOut!.path), "MP4 -> MOV conversion must succeed")
+                if let webmOut { try? FileManager.default.removeItem(at: webmOut) }
+                if let movOut { try? FileManager.default.removeItem(at: movOut) }
+                try? FileManager.default.removeItem(at: mp4URL)
+                print("  ✓ VideoConversionEngine transcode (FFmpeg + AVFoundation): OK")
+            }
 
             // Clean up test items
             try? FileManager.default.removeItem(at: testFolder)

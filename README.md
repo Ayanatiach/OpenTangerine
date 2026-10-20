@@ -18,11 +18,23 @@ original file and revealed in Finder.
 
 | Gesture | Target | Wheel | What you get |
 |---|---|---|---|
-| **⇧ Shift + Drag** | Files | Convert | PDF → DOCX / JPG / PNG / TXT · Images → PNG / WEBP / HEIC / JPG / AVIF / BMP / PDF / DOCX / TIFF |
+| **⇧ Shift + Drag** | Files | Convert | **Videos** → MP4 / MOV / WEBM / MKV / AVI / WMV / FLV / 3GP / OGV · **PDF** → DOCX / JPG / PNG / TXT · **Images** → PNG / WEBP / HEIC / JPG / AVIF / BMP / PDF / DOCX / TIFF |
 | **⇧ Shift + Drag** | Folders & ZIPs | Folder Actions | **Zip Folder** · **Unzip Archive** · **Folder/Archive Info** (file breakdown, disk size, nesting, permissions) |
 | **⌥⇧ Option + Shift + Drag** | Images | Tools | **Remove BG** (AI Auto-Mask & Point Wand) · **Crop** (4-side & corner resize, aspect locks) · **Add BG** (backdrop, corners, shadow, subject isolation) · **Metadata** (EXIF/GPS inspector & clean export) · **Compress** |
 
-Everything runs **100% offline** using Apple frameworks (Vision, PDFKit, ImageIO, CoreGraphics, SwiftUI).
+Everything runs **100% offline** using Apple frameworks (Vision, PDFKit, ImageIO, CoreGraphics, AVFoundation, SwiftUI) with optional FFmpeg integration for expanded video codecs.
+
+### 🎬 Multi-Format Video Transcoding Engine (Shift + Drag)
+
+Drag any video file in Finder and hold **Shift (⇧)** to trigger the Video Convert wheel:
+- **Comprehensive Format Support**: Convert videos between **3GP**, **AVI**, **FLV**, **MKV**, **MOV**, **MP4**, **OGV**, **WEBM**, and **WMV**.
+- **Video Technical Inspector ("INFO" Slice)**: Dedicated `INFO` slice on both Convert and Tools wheels providing seamless continuity with Folder and Image inspectors. Extracts video codec, profile, dimensions, aspect ratio, frame rate, pixel format, video/audio bitrates, audio channels/layout, audio sample rate, container duration, and live frame thumbnail preview, with "Copy All Info", "Show in Finder", and "Open in Player".
+- **Dual-Engine Architecture**:
+  - **FFmpeg High-Performance Transcoding**: Full-spectrum container and codec support, auto-discovering FFmpeg in `/opt/homebrew`, `/usr/local`, `~/.local/bin`, or PATH.
+  - **Apple AVFoundation Native Fallback**: 100% offline, zero-dependency encoding for macOS native containers (MP4, MOV, 3GP) even when FFmpeg is not installed.
+  - **Automatic Dimension Normalization**: Filters odd dimensions (`scale=trunc(iw/2)*2:trunc(ih/2)*2`) to guarantee encoder compatibility on custom crops and screen recordings.
+  - **Asynchronous Background Processing**: Transcoding runs in the background with live status updates and system notifications upon completion.
+  - **Terminal / CLI Support**: Run command-line conversions using `swift run -c release OpenTangerine --convert <format> <video-file>`.
 
 ### ✂️ Flawless Multi-Side Crop & AI Background Removal (v1.0.5)
 
@@ -68,7 +80,7 @@ Keep OpenTangerine up to date directly from the app:
 ## 📦 Install
 
 ### Option A: Direct Download (Recommended)
-1. Download **[OpenTangerine-1.0.5-macOS.zip](https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.5/OpenTangerine-1.0.5-macOS.zip)** from the [Releases](https://github.com/Ayanatiach/OpenTangerine/releases) page.
+1. Download **[OpenTangerine-1.0.6-macOS.zip](https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.6/OpenTangerine-1.0.6-macOS.zip)** from the [Releases](https://github.com/Ayanatiach/OpenTangerine/releases) page.
 2. Unzip and drag **OpenTangerine.app** into your `/Applications` folder.
 3. Because the app is ad-hoc signed, on first launch **right-click → Open**, then click **Open**.
    *(Or run: `xattr -dr com.apple.quarantine /Applications/OpenTangerine.app` in Terminal)*
@@ -76,7 +88,7 @@ Keep OpenTangerine up to date directly from the app:
 
 ### Option B: One-Line Terminal Install
 ```bash
-curl -fsSL https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.5/OpenTangerine-1.0.5-macOS.zip -o /tmp/OpenTangerine.zip && \
+curl -fsSL https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.6/OpenTangerine-1.0.6-macOS.zip -o /tmp/OpenTangerine.zip && \
 unzip -q -o /tmp/OpenTangerine.zip -d /Applications && \
 xattr -dr com.apple.quarantine /Applications/OpenTangerine.app && \
 open -a /Applications/OpenTangerine.app
@@ -108,7 +120,8 @@ OpenTangerine/
 ├── Package.swift                     # SwiftPM manifest (macOS 13+, executable target)
 ├── Sources/OpenTangerine/
 │   ├── OpenTangerine.swift           # App: drag monitor, radial wheel, conversion engine, editors
-│   └── BackgroundRemoval.swift       # Vision AI & Magic Wand flood fill background removal engine
+│   ├── BackgroundRemoval.swift       # Vision AI & Magic Wand flood fill background removal engine
+│   └── VideoConversion.swift         # Multi-format video transcoding engine (FFmpeg & AVFoundation)
 ├── Assets/AppIcon.png                # 1024×1024 source icon (converted to .icns at package time)
 └── scripts/package_app.sh            # Builds & bundles OpenTangerine.app
 ```
