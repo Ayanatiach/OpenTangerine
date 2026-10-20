@@ -12,6 +12,8 @@ import SwiftUI
 import AppKit
 import Foundation
 import AVFoundation
+import CoreVideo
+import CoreMedia
 
 // MARK: - Process Runner
 
@@ -252,6 +254,277 @@ public final class VideoConversionEngine: @unchecked Sendable {
               (try? destinationURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) ?? 0 > 0 else {
             throw ConversionError.exportFailed("Video conversion generated an empty or missing output file.")
         }
+    }
+
+    // MARK: - Audio to Video Conversion (Shift + Option + Drag)
+
+    public func convertAudioToVideo(sourceURL: URL, destinationURL: URL, format: String) throws {
+        let targetExt = FileCategory.normalizedExtension(format)
+        guard canConvert(to: targetExt) else {
+            throw ConversionError.unsupportedConversion(
+                "\(sourceURL.pathExtension.uppercased()) → \(targetExt.uppercased()) is not supported"
+            )
+        }
+
+        if let ffmpegPath = FFmpegDiscovery.resolvePath() {
+            try convertAudioToVideoWithFFmpeg(ffmpegPath: ffmpegPath, sourceURL: sourceURL, destinationURL: destinationURL, format: targetExt)
+        } else {
+            let nativeFormats = ["mp4", "mov", "3gp"]
+            if nativeFormats.contains(targetExt) {
+                try convertAudioToVideoWithAVFoundation(sourceURL: sourceURL, destinationURL: destinationURL, format: targetExt)
+            } else {
+                throw ConversionError.unsupportedConversion(
+                    "Converting audio to \(targetExt.uppercased()) video requires FFmpeg. Install it with: brew install ffmpeg"
+                )
+            }
+        }
+
+        // Verify the resulting file was created and is non-empty
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: destinationURL.path, isDirectory: &isDir),
+              !isDir.boolValue,
+              (try? destinationURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) ?? 0 > 0 else {
+            throw ConversionError.exportFailed("Audio to video conversion generated an empty or missing output file.")
+        }
+
+        DispatchQueue.main.async {
+            MemoryOptimizer.reclaimMemory()
+        }
+    }
+
+    private func convertAudioToVideoWithFFmpeg(ffmpegPath: String, sourceURL: URL, destinationURL: URL, format: String) throws {
+        let artworkImage = AudioMetadataService.extractArtwork(for: sourceURL) ?? FileIconService.getCustomIcon(for: sourceURL)
+
+        var tempImageURL: URL? = nil
+        defer {
+            if let temp = tempImageURL {
+                try? FileManager.default.removeItem(at: temp)
+            }
+        }
+
+        if let art = artworkImage,
+           let tiff = art.tiffRepresentation,
+           let rep = NSBitmapImageRep(data: tiff),
+           let pngData = rep.representation(using: .png, properties: [:]) {
+            let temp = FileManager.default.temporaryDirectory.appendingPathComponent("ot_art_\(UUID().uuidString).png")
+            if (try? pngData.write(to: temp)) != nil {
+                tempImageURL = temp
+            }
+        }
+
+        var videoCodecArgs: [String]
+        switch format {
+        case "webm":
+            videoCodecArgs = ["-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0", "-c:a", "libopus", "-b:a", "192k"]
+        case "ogv":
+            videoCodecArgs = ["-c:v", "libtheora", "-q:v", "6", "-c:a", "libvorbis", "-q:a", "5"]
+        case "wmv":
+            videoCodecArgs = ["-c:v", "wmv2", "-b:v", "1500k", "-c:a", "wmav2", "-b:a", "192k"]
+        case "flv":
+            videoCodecArgs = ["-c:v", "flv", "-c:a", "aac", "-b:a", "192k"]
+        default: // mp4, mov, mkv, avi, 3gp
+            videoCodecArgs = [
+                "-c:v", "libx264",
+                "-tune", "stillimage",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-movflags", "+faststart"
+            ]
+        }
+
+        let scaleFilter = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+
+        var fullArgs: [String]
+        if let temp = tempImageURL {
+            fullArgs = [
+                "-nostdin", "-y",
+                "-loop", "1",
+                "-framerate", "2",
+                "-i", temp.path,
+                "-i", sourceURL.path
+            ] + videoCodecArgs + [
+                "-vf", scaleFilter,
+                "-shortest",
+                destinationURL.path
+            ]
+        } else {
+            fullArgs = [
+                "-nostdin", "-y",
+                "-f", "lavfi",
+                "-i", "color=c=0x18181f:s=1280x720:r=2",
+                "-i", sourceURL.path
+            ] + videoCodecArgs + [
+                "-shortest",
+                destinationURL.path
+            ]
+        }
+
+        let result = try ProcessRunner.run(ffmpegPath, fullArgs)
+        if result.status != 0 {
+            let errText = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            let summary = errText.split(separator: "\n").suffix(3).joined(separator: " ")
+            throw ConversionError.exportFailed(summary.isEmpty ? "FFmpeg audio-to-video exited with code \(result.status)" : summary)
+        }
+    }
+
+    private func convertAudioToVideoWithAVFoundation(sourceURL: URL, destinationURL: URL, format: String) throws {
+        let asset = AVURLAsset(url: sourceURL)
+        let duration = asset.duration
+        guard duration.seconds > 0 && duration.seconds.isFinite else {
+            throw ConversionError.unreadableSource("Cannot read audio duration from \(sourceURL.lastPathComponent)")
+        }
+
+        let outputFileType: AVFileType = format == "mov" ? .mov : .mp4
+
+        guard let writer = try? AVAssetWriter(outputURL: destinationURL, fileType: outputFileType) else {
+            throw ConversionError.exportFailed("Could not initialize AVAssetWriter for \(destinationURL.lastPathComponent)")
+        }
+
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: 1280,
+            AVVideoHeightKey: 720
+        ]
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        videoInput.expectsMediaDataInRealTime = false
+
+        let sourcePixelBufferAttributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32ARGB),
+            kCVPixelBufferWidthKey as String: 1280,
+            kCVPixelBufferHeightKey as String: 720,
+            kCVPixelBufferCGBitmapContextCompatibilityKey as String: true
+        ]
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: videoInput,
+            sourcePixelBufferAttributes: sourcePixelBufferAttributes
+        )
+
+        guard writer.canAdd(videoInput) else {
+            throw ConversionError.exportFailed("Cannot add video input to AVAssetWriter")
+        }
+        writer.add(videoInput)
+
+        guard let reader = try? AVAssetReader(asset: asset) else {
+            throw ConversionError.unreadableSource("Cannot read audio track from \(sourceURL.lastPathComponent)")
+        }
+        let audioTracks = asset.tracks(withMediaType: .audio)
+        guard let audioTrack = audioTracks.first else {
+            throw ConversionError.unreadableSource("No audio track found in \(sourceURL.lastPathComponent)")
+        }
+
+        let audioOutputSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
+        let readerOutput = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: audioOutputSettings)
+        guard reader.canAdd(readerOutput) else {
+            throw ConversionError.exportFailed("Cannot add reader output for audio track")
+        }
+        reader.add(readerOutput)
+
+        let audioWriterSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVNumberOfChannelsKey: 2,
+            AVSampleRateKey: 44100,
+            AVEncoderBitRateKey: 192000
+        ]
+        let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioWriterSettings)
+        audioInput.expectsMediaDataInRealTime = false
+        if writer.canAdd(audioInput) {
+            writer.add(audioInput)
+        }
+
+        guard writer.startWriting() else {
+            throw ConversionError.exportFailed("AVAssetWriter startWriting failed: \(writer.error?.localizedDescription ?? "unknown error")")
+        }
+        guard reader.startReading() else {
+            throw ConversionError.exportFailed("AVAssetReader startReading failed: \(reader.error?.localizedDescription ?? "unknown error")")
+        }
+
+        writer.startSession(atSourceTime: .zero)
+
+        let artwork = AudioMetadataService.extractArtwork(for: sourceURL) ?? FileIconService.getCustomIcon(for: sourceURL)
+        if let buffer = createPixelBuffer(from: artwork, width: 1280, height: 720) {
+            while !videoInput.isReadyForMoreMediaData {
+                usleep(1000)
+            }
+            adaptor.append(buffer, withPresentationTime: .zero)
+            let frameTime = CMTime(seconds: duration.seconds, preferredTimescale: 600)
+            adaptor.append(buffer, withPresentationTime: frameTime)
+        }
+        videoInput.markAsFinished()
+
+        while let sampleBuffer = readerOutput.copyNextSampleBuffer() {
+            while !audioInput.isReadyForMoreMediaData {
+                usleep(1000)
+            }
+            audioInput.append(sampleBuffer)
+        }
+        audioInput.markAsFinished()
+
+        let semaphore = DispatchSemaphore(value: 0)
+        writer.finishWriting {
+            semaphore.signal()
+        }
+        semaphore.wait()
+
+        if writer.status != .completed {
+            throw ConversionError.exportFailed(writer.error?.localizedDescription ?? "AVAssetWriter failed to complete")
+        }
+    }
+
+    private func createPixelBuffer(from image: NSImage?, width: Int, height: Int) -> CVPixelBuffer? {
+        var pixelBuffer: CVPixelBuffer?
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: true
+        ]
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            kCVPixelFormatType_32ARGB,
+            attrs as CFDictionary,
+            &pixelBuffer
+        )
+        guard status == kCVReturnSuccess, let buffer = pixelBuffer else { return nil }
+
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+
+        guard let pxData = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+        let rgbColorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: pxData,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+            space: rgbColorSpace,
+            bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
+        ) else { return nil }
+
+        ctx.setFillColor(CGColor(red: 0.09, green: 0.09, blue: 0.12, alpha: 1.0))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+
+        if let image {
+            var rect = CGRect(origin: .zero, size: image.size)
+            if let cg = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) {
+                let imgW = CGFloat(cg.width)
+                let imgH = CGFloat(cg.height)
+                let scale = min(CGFloat(height - 80) / imgH, CGFloat(width - 80) / imgW)
+                let targetW = imgW * scale
+                let targetH = imgH * scale
+                let destRect = CGRect(x: (CGFloat(width) - targetW) / 2, y: (CGFloat(height) - targetH) / 2, width: targetW, height: targetH)
+                ctx.draw(cg, in: destRect)
+            }
+        }
+
+        return buffer
     }
 
     // MARK: FFmpeg Conversion

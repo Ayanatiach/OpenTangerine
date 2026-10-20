@@ -11,7 +11,7 @@ set -euo pipefail
 
 APP_NAME="OpenTangerine"
 BUNDLE_ID="com.ayanatiach.OpenTangerine"
-VERSION="1.0.6"
+VERSION="1.0.8"
 BUILD_NUMBER="1"
 MIN_MACOS="13.0"
 
@@ -41,9 +41,16 @@ fi
 # ---------------------------------------------------------------------------
 echo "==> Assembling $APP_NAME.app…"
 rm -rf "$APP_DIR"
-mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$APP_DIR/Contents/Frameworks"
 cp "$BIN_PATH" "$APP_DIR/Contents/MacOS/$APP_NAME"
 printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
+
+# Bundle opencore-amr if available for standalone AMR encoding
+if [[ -f "/opt/homebrew/lib/libopencore-amrnb.0.dylib" ]]; then
+    cp "/opt/homebrew/lib/libopencore-amrnb.0.dylib" "$APP_DIR/Contents/Frameworks/libopencore-amrnb.dylib"
+elif [[ -f "/usr/local/lib/libopencore-amrnb.0.dylib" ]]; then
+    cp "/usr/local/lib/libopencore-amrnb.0.dylib" "$APP_DIR/Contents/Frameworks/libopencore-amrnb.dylib"
+fi
 
 # ---------------------------------------------------------------------------
 # 3. App icon (.icns generated from Assets/AppIcon.png)

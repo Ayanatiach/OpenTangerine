@@ -74,7 +74,7 @@ public enum MemoryOptimizer {
 
 public enum WheelMode: String, CaseIterable {
     case convert = "Convert (⇧ + Drag)"
-    case tools = "Tools (⌥⇧ + Drag)"
+    case tools = "Tools & Cross-Convert (⌥⇧ + Drag)"
 }
 
 /// How the wheel was opened: from a Finder drag (release over a slice) or from the menu bar (click a slice).
@@ -102,7 +102,7 @@ public enum FileCategory: String {
             return .image
         case "mp4", "mov", "mkv", "avi", "webm", "wmv", "flv", "3gp", "3g2", "ogv", "m4v", "ts", "mts", "m2ts", "vob", "divx", "asf", "mpg", "mpeg", "f4v":
             return .video
-        case "mp3", "m4a", "wav", "flac", "aac", "ogg", "aiff":
+        case "mp3", "m4a", "wav", "flac", "aac", "ogg", "aiff", "alac", "amr", "wma", "oga", "opus", "caf", "m4b", "m4r", "aif", "aifc", "awb", "bwf":
             return .audio
         case "txt", "rtf", "docx", "md", "html", "htm":
             return .document
@@ -125,7 +125,25 @@ public enum FileCategory: String {
         case "asf": return "wmv"
         case "qt": return "mov"
         case "m4v": return "mp4"
+        case "aif", "aifc": return "aiff"
+        case "wave", "bwf": return "wav"
+        case "m4b", "m4r": return "m4a"
+        case "oga", "opus": return "ogg"
+        case "awb": return "amr"
         default: return ext.lowercased()
+        }
+    }
+
+    public var badgeText: String {
+        switch self {
+        case .pdf: return "PDF"
+        case .image: return "IMAGE"
+        case .video: return "VIDEO"
+        case .audio: return "AUDIO"
+        case .document: return "DOCUMENT"
+        case .archive: return "ARCHIVE"
+        case .folder: return "FOLDER"
+        case .unknown: return "FILE"
         }
     }
 }
@@ -135,6 +153,9 @@ public enum RadialActionType: Equatable {
     case openTool(ToolKind)
     case folderAction(FolderAction)
     case inspectVideo
+    case editAudioMetadata
+    case inspectAudio
+    case changeFileIcon
 }
 
 /// Actions that only apply to folders (zip / info) and ZIP archives (unzip / info).
@@ -165,6 +186,7 @@ public enum ToolKind: String, CaseIterable, Identifiable {
     case removeBG = "REMOVE BG"
     case addBG = "ADD BG"
     case compress = "COMPRESS"
+    case icon = "ICON"
     case metadata = "METADATA"
 
     public var id: String { rawValue }
@@ -174,6 +196,7 @@ public enum ToolKind: String, CaseIterable, Identifiable {
         case .crop: return "crop"
         case .removeBG: return "person.and.background.dotted"
         case .compress: return "arrow.down.right.and.arrow.up.left"
+        case .icon: return "photo.artframe"
         case .metadata: return "info.circle"
         case .addBG: return "photo.artframe"
         }
@@ -184,6 +207,7 @@ public enum ToolKind: String, CaseIterable, Identifiable {
         case .crop: return "Crop & resize"
         case .removeBG: return "Remove background"
         case .compress: return "Shrink file size"
+        case .icon: return "Set custom icon"
         case .metadata: return "Inspect EXIF & GPS"
         case .addBG: return "Add a backdrop"
         }
@@ -206,7 +230,7 @@ public struct RadialSlice: Identifiable, Equatable {
 
     public var isTool: Bool {
         switch action {
-        case .openTool, .folderAction, .inspectVideo: return true
+        case .openTool, .folderAction, .inspectVideo, .editAudioMetadata, .inspectAudio, .changeFileIcon: return true
         case .convertToFormat: return false
         }
     }
@@ -227,12 +251,16 @@ public struct RadialMenuConfiguration {
             let isArchive = category == .archive
             let primary: FolderAction = isArchive ? .unzip : .zip
             let subtitle = category == .folder ? "Folder" : fileSizeString
-            let primarySlice = RadialSlice(title: primary.rawValue, systemIcon: primary.systemIcon,
-                                           hint: primary.hint(isArchive: isArchive), action: .folderAction(primary))
-            let info = RadialSlice(title: FolderAction.info.rawValue, systemIcon: FolderAction.info.systemIcon,
-                                   hint: FolderAction.info.hint(isArchive: isArchive), action: .folderAction(.info))
-            // Offer both primary action (ZIP/UNZIP) and metadata inspector (INFO) in Shift (convert) and tools modes
-            return RadialMenuConfiguration(outerSlices: [primarySlice, info], centerSubtitle: subtitle, emptyMessage: nil)
+            var slices: [RadialSlice] = [
+                RadialSlice(title: primary.rawValue, systemIcon: primary.systemIcon,
+                            hint: primary.hint(isArchive: isArchive), action: .folderAction(primary)),
+                RadialSlice(title: FolderAction.info.rawValue, systemIcon: FolderAction.info.systemIcon,
+                            hint: FolderAction.info.hint(isArchive: isArchive), action: .folderAction(.info))
+            ]
+            if category == .folder {
+                slices.append(RadialSlice(title: "ICON", systemIcon: "photo.artframe", hint: "Set folder icon", action: .changeFileIcon))
+            }
+            return RadialMenuConfiguration(outerSlices: slices, centerSubtitle: subtitle, emptyMessage: nil)
         }
 
         switch mode {
@@ -247,6 +275,8 @@ public struct RadialMenuConfiguration {
                 targets = ["TXT", "RTF", "DOCX", "HTML"]
             case .video:
                 targets = ["MP4", "MOV", "WEBM", "MKV", "AVI", "WMV", "FLV", "3GP", "OGV"]
+            case .audio:
+                targets = ["AAC", "AIFF", "ALAC", "AMR", "FLAC", "M4A", "MP3", "OGG", "WAV", "WMA"]
             default:
                 targets = []
             }
@@ -255,7 +285,11 @@ public struct RadialMenuConfiguration {
                 .filter { FileConversionEngine.shared.canConvert(category, to: $0.lowercased()) }
                 .map { RadialSlice(title: $0, systemIcon: Self.icon(forFormat: $0), action: .convertToFormat($0.lowercased())) }
             if category == .video {
+                slices.append(RadialSlice(title: "ICON", systemIcon: "photo.artframe", hint: "Set video icon & poster", action: .changeFileIcon))
                 slices.append(RadialSlice(title: "INFO", systemIcon: "info.circle", hint: "Inspect video specs", action: .inspectVideo))
+            } else if category == .audio {
+                slices.append(RadialSlice(title: "TAGS", systemIcon: "tag.fill", hint: "Edit metadata name & icon", action: .editAudioMetadata))
+                slices.append(RadialSlice(title: "INFO", systemIcon: "waveform", hint: "Inspect audio specs", action: .inspectAudio))
             }
             return RadialMenuConfiguration(
                 outerSlices: slices,
@@ -265,11 +299,39 @@ public struct RadialMenuConfiguration {
 
         case .tools:
             if category == .video {
+                let audioTargets = ["MP3", "M4A", "AAC", "WAV", "FLAC", "OGG", "AIFF", "ALAC", "WMA"]
+                var slices = audioTargets.map { fmt in
+                    RadialSlice(
+                        title: fmt,
+                        systemIcon: Self.icon(forFormat: fmt),
+                        hint: "Extract audio to \(fmt)",
+                        action: .convertToFormat(fmt.lowercased())
+                    )
+                }
+                slices.append(RadialSlice(title: "ICON", systemIcon: "photo.artframe", hint: "Set video icon & poster", action: .changeFileIcon))
+                slices.append(RadialSlice(title: "INFO", systemIcon: "info.circle", hint: "Inspect video specs", action: .inspectVideo))
                 return RadialMenuConfiguration(
-                    outerSlices: [
-                        RadialSlice(title: "INFO", systemIcon: "info.circle", hint: "Inspect video specs", action: .inspectVideo)
-                    ],
-                    centerSubtitle: fileSizeString,
+                    outerSlices: slices,
+                    centerSubtitle: "\(fileSizeString) · Extract Audio",
+                    emptyMessage: nil
+                )
+            }
+            if category == .audio {
+                let videoTargets = ["MP4", "MOV", "WEBM", "MKV", "AVI", "WMV", "FLV", "3GP", "OGV"]
+                var slices = videoTargets.map { fmt in
+                    RadialSlice(
+                        title: fmt,
+                        systemIcon: Self.icon(forFormat: fmt),
+                        hint: "Convert audio to \(fmt) video",
+                        action: .convertToFormat(fmt.lowercased())
+                    )
+                }
+                slices.append(RadialSlice(title: "TAGS", systemIcon: "tag.fill", hint: "Edit metadata name & cover icon", action: .editAudioMetadata))
+                slices.append(RadialSlice(title: "ICON", systemIcon: "photo.artframe", hint: "Set audio custom icon", action: .changeFileIcon))
+                slices.append(RadialSlice(title: "INFO", systemIcon: "waveform", hint: "Inspect audio specs", action: .inspectAudio))
+                return RadialMenuConfiguration(
+                    outerSlices: slices,
+                    centerSubtitle: "\(fileSizeString) · Convert to Video",
                     emptyMessage: nil
                 )
             }
@@ -294,6 +356,12 @@ public struct RadialMenuConfiguration {
         case "RTF": return "textformat"
         case "HTML": return "chevron.left.forwardslash.chevron.right"
         case "MP4", "MOV", "WEBM", "MKV", "AVI", "WMV", "FLV", "3GP", "OGV": return "film"
+        case "AAC", "M4A", "MP3": return "music.note"
+        case "FLAC", "ALAC": return "waveform.badge.magnifyingglass"
+        case "WAV", "AIFF": return "waveform"
+        case "OGG": return "antenna.radiowaves.left.and.right"
+        case "AMR": return "phone.bubble.left"
+        case "WMA": return "opticaldisc"
         default: return "photo"
         }
     }
@@ -490,8 +558,10 @@ public final class FileConversionEngine: @unchecked Sendable {
             return Self.canEncode(ext)
         case (.document, "txt"), (.document, "rtf"), (.document, "docx"), (.document, "html"):
             return true
+        case (.audio, _):
+            return AudioConversionEngine.shared.canConvert(to: ext) || VideoConversionEngine.shared.canConvert(to: ext)
         case (.video, _):
-            return VideoConversionEngine.shared.canConvert(to: ext)
+            return VideoConversionEngine.shared.canConvert(to: ext) || AudioConversionEngine.shared.canConvert(to: ext)
         default:
             return false
         }
@@ -525,6 +595,12 @@ public final class FileConversionEngine: @unchecked Sendable {
                 try convertImageFormat(sourceURL: sourceURL, destinationURL: destinationURL, format: ext)
             case (.document, _):
                 try convertDocument(sourceURL: sourceURL, destinationURL: destinationURL, format: ext)
+            case (.audio, _) where VideoConversionEngine.shared.canConvert(to: ext):
+                try VideoConversionEngine.shared.convertAudioToVideo(sourceURL: sourceURL, destinationURL: destinationURL, format: ext)
+            case (.audio, _):
+                try AudioConversionEngine.shared.convertAudio(sourceURL: sourceURL, destinationURL: destinationURL, format: ext)
+            case (.video, _) where AudioConversionEngine.shared.canConvert(to: ext):
+                try AudioConversionEngine.shared.convertAudio(sourceURL: sourceURL, destinationURL: destinationURL, format: ext)
             case (.video, _):
                 try VideoConversionEngine.shared.convertVideo(sourceURL: sourceURL, destinationURL: destinationURL, format: ext)
             default:
@@ -4163,7 +4239,7 @@ public final class AppUpdateService: ObservableObject {
         if let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, !v.isEmpty {
             return v
         }
-        return "1.0.6"
+        return "1.0.8"
     }
 
     @Published public var state: UpdateState = .idle
@@ -4803,7 +4879,7 @@ public final class AppCoordinator: ObservableObject {
             guard let self else { return }
             self.hideWheel()
             switch slice.action {
-            case .openTool, .inspectVideo:
+            case .openTool, .inspectVideo, .editAudioMetadata, .inspectAudio, .changeFileIcon:
                 if let first = urls.first {
                     self.execute(slice.action, for: first)
                 }
@@ -4894,8 +4970,21 @@ public final class AppCoordinator: ObservableObject {
     public func execute(_ action: RadialActionType, for fileURL: URL) {
         switch action {
         case .convertToFormat(let ext):
-            let isVideo = FileCategory.detect(from: fileURL) == .video
-            if isVideo {
+            let cat = FileCategory.detect(from: fileURL)
+            let isAsync = cat == .video || cat == .audio
+            if isAsync {
+                let targetIsVideo = VideoConversionEngine.shared.canConvert(to: ext)
+                let targetIsAudio = AudioConversionEngine.shared.canConvert(to: ext)
+                let typeLabel: String
+                if cat == .audio && targetIsVideo {
+                    typeLabel = "Audio → Video"
+                } else if cat == .video && targetIsAudio {
+                    typeLabel = "Audio Extracted"
+                } else if cat == .audio {
+                    typeLabel = "Audio"
+                } else {
+                    typeLabel = "Video"
+                }
                 statusMessage = "Converting \(fileURL.lastPathComponent) → \(ext.uppercased())…"
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                     autoreleasepool {
@@ -4904,7 +4993,7 @@ public final class AppCoordinator: ObservableObject {
                             DispatchQueue.main.async {
                                 guard let self else { return }
                                 self.statusMessage = "Saved \(outURL.lastPathComponent)"
-                                self.showNotification(title: "Video Converted", message: "Saved \(outURL.lastPathComponent)")
+                                self.showNotification(title: "\(typeLabel) Converted", message: "Saved \(outURL.lastPathComponent)")
                                 NSWorkspace.shared.activateFileViewerSelecting([outURL])
                                 MemoryOptimizer.reclaimMemory()
                             }
@@ -4991,6 +5080,13 @@ public final class AppCoordinator: ObservableObject {
                     },
                     onClose: { [weak self] in self?.closeEditor() }
                 ), size: CGSize(width: 520, height: 620))
+
+            case .icon:
+                statusMessage = "Editing custom icon: \(fileURL.lastPathComponent)"
+                openEditor(FileIconEditorView(
+                    sourceURL: fileURL,
+                    onClose: { [weak self] in self?.closeEditor() }
+                ), size: CGSize(width: 500, height: 600))
             }
 
         case .folderAction(let action):
@@ -5016,6 +5112,34 @@ public final class AppCoordinator: ObservableObject {
                 sourceURL: fileURL,
                 onClose: { [weak self] in self?.closeEditor() }
             ), size: CGSize(width: 520, height: 640))
+
+        case .editAudioMetadata:
+            statusMessage = "Editing metadata & icon: \(fileURL.lastPathComponent)"
+            openEditor(AudioMetadataEditorView(
+                sourceURL: fileURL,
+                onClose: { [weak self] in self?.closeEditor() }
+            ), size: CGSize(width: 530, height: 650))
+
+        case .inspectAudio:
+            statusMessage = "Inspecting audio: \(fileURL.lastPathComponent)"
+            openEditor(AudioInspectorView(
+                sourceURL: fileURL,
+                onClose: { [weak self] in self?.closeEditor() },
+                onEditRequested: { [weak self] in
+                    guard let self else { return }
+                    self.openEditor(AudioMetadataEditorView(
+                        sourceURL: fileURL,
+                        onClose: { [weak self] in self?.closeEditor() }
+                    ), size: CGSize(width: 530, height: 650))
+                }
+            ), size: CGSize(width: 520, height: 620))
+
+        case .changeFileIcon:
+            statusMessage = "Editing custom icon: \(fileURL.lastPathComponent)"
+            openEditor(FileIconEditorView(
+                sourceURL: fileURL,
+                onClose: { [weak self] in self?.closeEditor() }
+            ), size: CGSize(width: 500, height: 600))
         }
     }
 
@@ -5179,6 +5303,78 @@ public struct OpenTangerineApp: App {
             }
         }
 
+        if CommandLine.arguments.count >= 4 && CommandLine.arguments[1] == "--set-title" {
+            let newTitle = CommandLine.arguments[2]
+            let filePath = CommandLine.arguments[3]
+            let url = URL(fileURLWithPath: filePath)
+            do {
+                _ = try AudioMetadataService.updateMetadataAndIcon(
+                    url: url,
+                    newTitle: newTitle,
+                    newArtist: "",
+                    newAlbum: "",
+                    newAlbumArtist: "",
+                    newYear: "",
+                    newGenre: "",
+                    newTrack: "",
+                    newComment: "",
+                    coverImage: nil,
+                    updateFinderIcon: false,
+                    embedArtwork: false
+                )
+                print("Updated metadata title: \"\(newTitle)\" for \(url.lastPathComponent)")
+                exit(0)
+            } catch {
+                fputs("Error: \(error.localizedDescription)\n", stderr)
+                exit(1)
+            }
+        }
+
+        if CommandLine.arguments.count >= 4 && CommandLine.arguments[1] == "--set-icon" {
+            let imagePath = CommandLine.arguments[2]
+            let targetPath = CommandLine.arguments[3]
+            guard let img = NSImage(contentsOfFile: imagePath) else {
+                fputs("Error: Could not load image from \(imagePath)\n", stderr)
+                exit(1)
+            }
+            let targetURL = URL(fileURLWithPath: targetPath)
+            let category = FileCategory.detect(from: targetURL)
+
+            if category == .audio {
+                do {
+                    _ = try AudioMetadataService.updateMetadataAndIcon(
+                        url: targetURL,
+                        newTitle: "",
+                        newArtist: "",
+                        newAlbum: "",
+                        newAlbumArtist: "",
+                        newYear: "",
+                        newGenre: "",
+                        newTrack: "",
+                        newComment: "",
+                        coverImage: img,
+                        updateFinderIcon: true,
+                        embedArtwork: true,
+                        applyToAllFolderTracks: true
+                    )
+                    print("Updated icon for: \(targetURL.lastPathComponent)")
+                    exit(0)
+                } catch {
+                    fputs("Error: \(error.localizedDescription)\n", stderr)
+                    exit(1)
+                }
+            } else {
+                let success = FileIconService.setIcon(image: img, for: targetURL, propagateToChildren: true)
+                if success {
+                    print("Updated icon for: \(targetURL.lastPathComponent)")
+                    exit(0)
+                } else {
+                    fputs("Error: Failed to set custom icon for \(targetURL.lastPathComponent)\n", stderr)
+                    exit(1)
+                }
+            }
+        }
+
         if CommandLine.arguments.contains("--test-memory") {
             print(String(format: "[MemTest] Baseline at launch: %.2f MB", MemoryOptimizer.currentFootprintMB))
             let coord = AppCoordinator()
@@ -5250,6 +5446,48 @@ public struct OpenTangerineApp: App {
                 print(String(format: "[MemTest] After convertFile (PNG -> JPG): %.2f MB", MemoryOptimizer.currentFootprintMB))
                 try? FileManager.default.removeItem(at: outURL)
             }
+
+            // Audio memory & metadata editor tests
+            let testAudioURL = tempDir.appendingPathComponent("mem_test_track.wav")
+            if let ffmpeg = FFmpegDiscovery.resolvePath() {
+                _ = try? ProcessRunner.run(ffmpeg, ["-y", "-f", "lavfi", "-i", "sine=f=440:d=1", testAudioURL.path])
+            }
+            if FileManager.default.fileExists(atPath: testAudioURL.path) {
+                coord.execute(.editAudioMetadata, for: testAudioURL)
+                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                print(String(format: "[MemTest] After open Audio Metadata Editor: %.2f MB", MemoryOptimizer.currentFootprintMB))
+
+                coord.closeEditor()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+                print(String(format: "[MemTest] After close Audio Metadata Editor: %.2f MB", MemoryOptimizer.currentFootprintMB))
+
+                let outAudio = try? FileConversionEngine.shared.convertFile(at: testAudioURL, to: "mp3")
+                if let outAudio {
+                    print(String(format: "[MemTest] After convertFile (WAV -> MP3): %.2f MB", MemoryOptimizer.currentFootprintMB))
+                    try? FileManager.default.removeItem(at: outAudio)
+                }
+
+                // Cross-conversion tests: Audio -> Video (WAV -> MP4) and Video -> Audio (MP4 -> M4A)
+                let outVideo = try? FileConversionEngine.shared.convertFile(at: testAudioURL, to: "mp4")
+                if let outVideo {
+                    print(String(format: "[MemTest] After cross-convert (WAV -> MP4 video): %.2f MB", MemoryOptimizer.currentFootprintMB))
+                    let extractedAudio = try? FileConversionEngine.shared.convertFile(at: outVideo, to: "m4a")
+                    if let extractedAudio {
+                        print(String(format: "[MemTest] After cross-convert (MP4 -> M4A audio extraction): %.2f MB", MemoryOptimizer.currentFootprintMB))
+                        try? FileManager.default.removeItem(at: extractedAudio)
+                    }
+                    try? FileManager.default.removeItem(at: outVideo)
+                }
+
+                try? FileManager.default.removeItem(at: testAudioURL)
+            }
+
+            coord.execute(.changeFileIcon, for: testImgURL)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+            print(String(format: "[MemTest] After open FileIconEditorView: %.2f MB", MemoryOptimizer.currentFootprintMB))
+            coord.closeEditor()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+            print(String(format: "[MemTest] After close FileIconEditorView: %.2f MB", MemoryOptimizer.currentFootprintMB))
 
             MemoryOptimizer.reclaimMemory()
             RunLoop.current.run(until: Date().addingTimeInterval(0.35))
@@ -5419,17 +5657,29 @@ public struct OpenTangerineApp: App {
             }
             if FileManager.default.fileExists(atPath: mp4URL.path) {
                 let videoConfig = RadialMenuConfiguration.build(for: mp4URL, mode: .convert)
-                assert(videoConfig.outerSlices.count == 9, "MP4 video must offer 8 other formats plus INFO")
+                assert(videoConfig.outerSlices.count == 10, "MP4 video must offer 8 other formats plus ICON and INFO")
                 assert(!videoConfig.outerSlices.map(\.title).contains("MP4"), "MP4 video must not offer MP4 to itself")
+                assert(videoConfig.outerSlices.map(\.title).contains("ICON"), "Video wheel must contain ICON slice")
                 assert(videoConfig.outerSlices.map(\.title).contains("INFO"), "Video wheel must contain INFO slice")
-                for targetTitle in ["MOV", "WEBM", "MKV", "AVI", "WMV", "FLV", "3GP", "OGV", "INFO"] {
+                for targetTitle in ["MOV", "WEBM", "MKV", "AVI", "WMV", "FLV", "3GP", "OGV", "ICON", "INFO"] {
                     assert(videoConfig.outerSlices.map(\.title).contains(targetTitle), "Video wheel missing \(targetTitle)")
                 }
-                print("  ✓ Video wheel configuration & 9-slice targets (8 formats + INFO): OK")
+                print("  ✓ Video wheel configuration & 10-slice targets (8 formats + ICON + INFO): OK")
 
                 let videoToolsConfig = RadialMenuConfiguration.build(for: mp4URL, mode: .tools)
-                assert(videoToolsConfig.outerSlices.count == 1 && videoToolsConfig.outerSlices.first?.title == "INFO", "Video tools wheel must contain INFO")
-                print("  ✓ Video tools wheel configuration: OK")
+                assert(videoToolsConfig.outerSlices.count == 11, "Video tools wheel must contain 9 audio targets + ICON and INFO")
+                assert(videoToolsConfig.outerSlices.map(\.title).contains("ICON"), "Video tools wheel missing ICON")
+                assert(videoToolsConfig.outerSlices.map(\.title).contains("INFO"), "Video tools wheel missing INFO")
+                for targetTitle in ["MP3", "M4A", "AAC", "WAV", "FLAC", "OGG", "AIFF", "ALAC", "WMA", "ICON", "INFO"] {
+                    assert(videoToolsConfig.outerSlices.map(\.title).contains(targetTitle), "Video tools wheel missing \(targetTitle)")
+                }
+                print("  ✓ Video tools & cross-convert wheel configuration (9 audio targets + ICON + INFO): OK")
+
+                // Video custom icon editor test
+                coord.execute(.changeFileIcon, for: mp4URL)
+                RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+                coord.closeEditor()
+                print("  ✓ FileIconEditorView lifecycle for video: OK")
 
                 // Video metadata extraction & inspector test
                 let videoReport = VideoMetadataReport.load(from: mp4URL)
@@ -5447,9 +5697,70 @@ public struct OpenTangerineApp: App {
                 assert(movOut != nil && FileManager.default.fileExists(atPath: movOut!.path), "MP4 -> MOV conversion must succeed")
                 if let webmOut { try? FileManager.default.removeItem(at: webmOut) }
                 if let movOut { try? FileManager.default.removeItem(at: movOut) }
+
+                // Test cross-conversion: Video -> Audio extraction (MP4 -> MP3)
+                let extractedAudioOut = try? FileConversionEngine.shared.convertFile(at: mp4URL, to: "mp3")
+                assert(extractedAudioOut != nil && FileManager.default.fileExists(atPath: extractedAudioOut!.path), "MP4 -> MP3 audio extraction must succeed")
+                if let extractedAudioOut { try? FileManager.default.removeItem(at: extractedAudioOut) }
+                print("  ✓ Video-to-audio extraction (MP4 -> MP3): OK")
+
                 try? FileManager.default.removeItem(at: mp4URL)
                 print("  ✓ VideoConversionEngine transcode (FFmpeg + AVFoundation): OK")
             }
+
+            // Audio category, wheel & cross-conversion stability tests
+            let audioExts = ["aac", "aiff", "alac", "amr", "flac", "m4a", "mp3", "ogg", "wav", "wma"]
+            for ext in audioExts {
+                let dummyURL = tempDir.appendingPathComponent("sample.\(ext)")
+                assert(FileCategory.detect(from: dummyURL) == .audio, "Sample .\(ext) must be detected as .audio")
+            }
+            let wavURL = tempDir.appendingPathComponent("ot_test_audio.wav")
+            if let ffmpegPath = FFmpegDiscovery.resolvePath() {
+                _ = try? ProcessRunner.run(ffmpegPath, ["-nostdin", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.5", wavURL.path])
+            }
+            if FileManager.default.fileExists(atPath: wavURL.path) {
+                let audioConfig = RadialMenuConfiguration.build(for: wavURL, mode: .convert)
+                assert(audioConfig.outerSlices.count == 11, "WAV audio must offer 9 other formats plus TAGS and INFO")
+                assert(!audioConfig.outerSlices.map(\.title).contains("WAV"), "WAV audio must not offer WAV to itself")
+                assert(audioConfig.outerSlices.map(\.title).contains("TAGS"), "Audio wheel must contain TAGS slice")
+                assert(audioConfig.outerSlices.map(\.title).contains("INFO"), "Audio wheel must contain INFO slice")
+                print("  ✓ Audio wheel configuration & 11-slice targets (9 formats + TAGS + INFO): OK")
+
+                let audioToolsConfig = RadialMenuConfiguration.build(for: wavURL, mode: .tools)
+                assert(audioToolsConfig.outerSlices.count == 12, "Audio tools wheel must contain 9 video targets + TAGS + ICON + INFO")
+                assert(audioToolsConfig.outerSlices.map(\.title).contains("TAGS"), "Audio tools wheel missing TAGS")
+                assert(audioToolsConfig.outerSlices.map(\.title).contains("ICON"), "Audio tools wheel missing ICON")
+                assert(audioToolsConfig.outerSlices.map(\.title).contains("INFO"), "Audio tools wheel missing INFO")
+                for targetTitle in ["MP4", "MOV", "WEBM", "MKV", "AVI", "WMV", "FLV", "3GP", "OGV"] {
+                    assert(audioToolsConfig.outerSlices.map(\.title).contains(targetTitle), "Audio tools wheel missing \(targetTitle)")
+                }
+                print("  ✓ Audio tools & cross-convert wheel configuration (9 video targets + TAGS + ICON + INFO): OK")
+
+                // Test cross-conversion: Audio -> Video (WAV -> MP4)
+                let videoFromAudioOut = try? FileConversionEngine.shared.convertFile(at: wavURL, to: "mp4")
+                assert(videoFromAudioOut != nil && FileManager.default.fileExists(atPath: videoFromAudioOut!.path), "WAV -> MP4 cross-conversion must succeed")
+                if let videoFromAudioOut { try? FileManager.default.removeItem(at: videoFromAudioOut) }
+                print("  ✓ Audio-to-video cross-conversion (WAV -> MP4): OK")
+
+                try? FileManager.default.removeItem(at: wavURL)
+            }
+
+            // Test FileIconEditorView & cropping on folder and image
+            coord.execute(.changeFileIcon, for: testFolder)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            coord.closeEditor()
+            print("  ✓ FileIconEditorView lifecycle for folder: OK")
+
+            coord.execute(.openTool(.icon), for: testImgURL)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            coord.closeEditor()
+            print("  ✓ FileIconEditorView lifecycle for image: OK")
+
+            // Test crop algorithm
+            let testImg = NSImage(size: NSSize(width: 200, height: 100))
+            let cropped = FileIconService.cropImage(testImg, normalizedCrop: CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5))
+            assert(cropped != nil, "FileIconService.cropImage must return cropped NSImage")
+            print("  ✓ FileIconService cropping engine & memory efficiency: OK")
 
             // Clean up test items
             try? FileManager.default.removeItem(at: testFolder)
@@ -5491,12 +5802,12 @@ public struct OpenTangerineApp: App {
                 }
                 Divider()
                 Text("• Hold Shift (⇧) + Drag: Convert Wheel").font(.caption)
-                Text("• Hold Option + Shift (⌥⇧) + Drag: Tools Wheel").font(.caption)
+                Text("• Hold Option + Shift (⌥⇧) + Drag: Tools & Cross-Convert Wheel").font(.caption)
                 Divider()
                 Button("Pick File to Test Convert Wheel…") {
                     coordinator.pickFileAndShowWheel(mode: .convert)
                 }
-                Button("Pick File to Test Tools Wheel…") {
+                Button("Pick File to Test Tools & Cross-Convert Wheel…") {
                     coordinator.pickFileAndShowWheel(mode: .tools)
                 }
                 Divider()

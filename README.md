@@ -18,11 +18,47 @@ original file and revealed in Finder.
 
 | Gesture | Target | Wheel | What you get |
 |---|---|---|---|
-| **⇧ Shift + Drag** | Files | Convert | **Videos** → MP4 / MOV / WEBM / MKV / AVI / WMV / FLV / 3GP / OGV · **PDF** → DOCX / JPG / PNG / TXT · **Images** → PNG / WEBP / HEIC / JPG / AVIF / BMP / PDF / DOCX / TIFF |
-| **⇧ Shift + Drag** | Folders & ZIPs | Folder Actions | **Zip Folder** · **Unzip Archive** · **Folder/Archive Info** (file breakdown, disk size, nesting, permissions) |
-| **⌥⇧ Option + Shift + Drag** | Images | Tools | **Remove BG** (AI Auto-Mask & Point Wand) · **Crop** (4-side & corner resize, aspect locks) · **Add BG** (backdrop, corners, shadow, subject isolation) · **Metadata** (EXIF/GPS inspector & clean export) · **Compress** |
+| **⇧ Shift + Drag** | Files | Convert | **Audio** → AAC / AIFF / ALAC / AMR / FLAC / M4A / MP3 / OGG / WAV / WMA · **Videos** → MP4 / MOV / WEBM / MKV / AVI / WMV / FLV / 3GP / OGV · **PDF** → DOCX / JPG / PNG / TXT · **Images** → PNG / WEBP / HEIC / JPG / AVIF / BMP / PDF / DOCX / TIFF |
+| **⇧ Shift + Drag** | Folders & ZIPs | Folder Actions | **Zip Folder** · **Unzip Archive** · **Folder/Archive Info** · **Custom Folder Icon** |
+| **⌥⇧ Option + Shift + Drag** | Video, Images, Audio, Folders | Tools & Cross-Convert | **Audio ↔ Video Cross-Conversion**: Convert Audio to **MP4 / MOV / WEBM / MKV / AVI / WMV / FLV / 3GP / OGV** · Extract Audio from Video to **MP3 / M4A / AAC / WAV / FLAC / OGG / AIFF / ALAC / WMA** · **Custom Icon Editor** (Crop/edit picture, Squircle guide, Finder icon sync) · **Audio**: **Tags & Name** (VLC title sync) · **Cover Picture & Finder Icon** · **Images**: **Custom Icon** · **Remove BG** · **Crop** · **Add BG** · **Metadata** · **Compress** · **Videos**: **Custom Icon & Poster** · **Info Specs** |
 
-Everything runs **100% offline** using Apple frameworks (Vision, PDFKit, ImageIO, CoreGraphics, AVFoundation, SwiftUI) with optional FFmpeg integration for expanded video codecs.
+Everything runs **100% offline** using Apple frameworks (Vision, PDFKit, ImageIO, CoreGraphics, AVFoundation, AudioToolbox, SwiftUI) with optional FFmpeg integration for expanded video & audio codecs.
+
+### 🔀 Audio ↔ Video Cross-Conversion (Shift + Option + Drag)
+
+Hold **Option + Shift (⌥⇧) + Drag** on any audio or video file to trigger the cross-conversion wheel:
+- **Audio to Video Transcoding**: Convert any music/audio track into a video file (**MP4**, **MOV**, **WEBM**, **MKV**, **AVI**, **WMV**, **FLV**, **3GP**, **OGV**). The resulting video displays the track's embedded album artwork or Finder custom icon formatted into a sleek 1280×720 visual card. High-performance FFmpeg rendering (2fps still-image looping with `-shortest`) or offline native AVFoundation pipeline guarantees instant exports and tiny file sizes.
+- **Video to Audio Extraction**: Extract pure, high-quality audio tracks from any video file into **MP3**, **M4A**, **AAC**, **WAV**, **FLAC**, **OGG**, **AIFF**, **ALAC**, or **WMA**, with audio stream extraction via FFmpeg `-vn` or Apple `afconvert`.
+- **Tools Wheel Integration**: Seamlessly retains access to **TAGS** (audio metadata editor), **ICON** (custom file icon editor with cropping), and **INFO** (specs inspector) in the same radial menu.
+- **Resource & Memory Optimization**: Background asynchronous execution with immediate autorelease pools and Mach VM heap purges ensuring zero UI freezing and minimal memory footprints.
+
+### 🖼️ Custom File & Folder Icon Studio with Interactive Cropper (v1.0.7)
+
+Drop or select any picture to personalize icons for **Videos**, **Images**, **Folders**, and **Audio**:
+- **Inline Crop / Edit Option**: When an image is dropped or selected, click the **"Edit / Crop"** option right beside **"Choose Picture…"** to crop or adjust it interactively before setting it.
+- **Interactive Multi-Side Crop with macOS Squircle Guide**: Crop using 1:1 Square, Free, 4:3, 16:9, or 3:2 presets with 8 corner/edge handles, center pan drag, and an optional **macOS Squircle Mask guide** showing the exact Apple icon contour.
+- **Universal File & Folder Support**:
+  - **Videos**: Change the Finder file icon and QuickLook poster artwork for MP4, MOV, MKV, AVI, etc.
+  - **Images**: Assign custom Finder icons to picture files with one click.
+  - **Folders**: Set custom Finder icons for any directory, with optional propagation to media files inside.
+  - **Audio & Music Albums**: Set Finder icon and embed album artwork synchronized with VLC Media Player.
+- **Revert to Default Icon**: Easily restore the default macOS system icon at any time with one click.
+- **CLI Commands**:
+  - `swift run -c release OpenTangerine --set-icon <image-path> <target-file-or-folder>`
+  - `swift run -c release OpenTangerine --set-title "<name>" <audio-file>`
+
+### 🎵 Multi-Format Music Transcoder & Metadata/Icon Engine (Shift + Drag / Tools)
+
+Drag any music file or album folder in Finder and hold **Shift (⇧)** or **Option + Shift (⌥⇧)**:
+- **10 Core Audio Formats**: Convert between **AAC**, **AIFF**, **ALAC**, **AMR**, **FLAC**, **M4A**, **MP3**, **OGG**, **WAV**, and **WMV/WMA** with native lossless and high-bitrate encoding.
+- **VLC-Compatible Metadata Name & Tag Editor**: Change the metadata Track Title (so VLC Media Player, Apple Music, and car stereos display your exact title), Artist, Album, Album Artist, Year, Genre, and Track Number.
+- **Custom Album Art & macOS Finder Icon with Crop/Edit**: Pick or drag-and-drop any picture from your machine, click **"Edit / Crop"** to adjust framing, embed into the audio file (ID3v2 APIC, MP4/ALAC covr, FLAC picture blocks), and update the macOS Finder custom icon on files and album folders.
+- **Dual Transcoding Engine**: High-performance FFmpeg transcoding with automatic Apple native fallback (`afconvert` / AudioToolbox) and bundled AMR bridge.
+- **Ultra-Low Memory Footprint**: Downsamples artwork in-memory (max 1200×1200), streams pipes asynchronously, and activates Mach VM heap pressure relief sweeps (`MemoryOptimizer.reclaimMemory()`) after conversions.
+- **CLI Commands**:
+  - Convert: `swift run -c release OpenTangerine --convert <format> <file>`
+  - Change metadata name: `swift run -c release OpenTangerine --set-title "<name>" <audio-file>`
+  - Change Finder icon & cover art: `swift run -c release OpenTangerine --set-icon <image-path> <file-or-album-folder>`
 
 ### 🎬 Multi-Format Video Transcoding Engine (Shift + Drag)
 
@@ -80,7 +116,7 @@ Keep OpenTangerine up to date directly from the app:
 ## 📦 Install
 
 ### Option A: Direct Download (Recommended)
-1. Download **[OpenTangerine-1.0.6-macOS.zip](https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.6/OpenTangerine-1.0.6-macOS.zip)** from the [Releases](https://github.com/Ayanatiach/OpenTangerine/releases) page.
+1. Download **[OpenTangerine-1.0.8-macOS.zip](https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.8/OpenTangerine-1.0.8-macOS.zip)** from the [Releases](https://github.com/Ayanatiach/OpenTangerine/releases) page.
 2. Unzip and drag **OpenTangerine.app** into your `/Applications` folder.
 3. Because the app is ad-hoc signed, on first launch **right-click → Open**, then click **Open**.
    *(Or run: `xattr -dr com.apple.quarantine /Applications/OpenTangerine.app` in Terminal)*
@@ -88,13 +124,58 @@ Keep OpenTangerine up to date directly from the app:
 
 ### Option B: One-Line Terminal Install
 ```bash
-curl -fsSL https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.6/OpenTangerine-1.0.6-macOS.zip -o /tmp/OpenTangerine.zip && \
+curl -fsSL https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.8/OpenTangerine-1.0.8-macOS.zip -o /tmp/OpenTangerine.zip && \
 unzip -q -o /tmp/OpenTangerine.zip -d /Applications && \
 xattr -dr com.apple.quarantine /Applications/OpenTangerine.app && \
 open -a /Applications/OpenTangerine.app
 ```
 
-OpenTangerine runs as a menu-bar-only app (no Dock icon). Look for the ⬢ icon in the menu bar.
+OpenTangerine runs as a menu-bar-only app (no Dock icon). Look for the ⬢ icon in your top menu bar.
+
+---
+
+## ⚡ Enabling All Video & Audio Formats (Installing Homebrew & FFmpeg)
+
+> **💡 Note for Beginners:** OpenTangerine works immediately out of the box for standard Mac media formats (MP4, MOV, 3GP, AAC, M4A, WAV, AIFF, ALAC) without installing anything extra.
+>
+> However, macOS does not come with built-in converters for specialty formats like **MP3**, **WebM**, **MKV**, **AVI**, **WMV**, **FLV**, **OGG**, or **WMA**. To convert or cross-convert with these formats, OpenTangerine uses **FFmpeg** (a free, safe, and open-source media converter).
+>
+> If you have never used the Terminal before, follow these simple steps below. It only takes about 2 minutes!
+
+### Step 1: Open the Terminal App
+1. On your Mac keyboard, press **Command (⌘) + Spacebar** to open Spotlight search.
+2. Type `Terminal` and press **Return (Enter)**.
+3. A small white or black window with a text prompt will appear on your screen.
+
+### Step 2: Install Homebrew (The Mac Package Installer)
+Homebrew is the trusted, official tool used by millions of Mac users to install free software safely.
+1. Copy this command:
+   ```bash
+   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+   ```
+2. Paste it into the Terminal window by pressing **Command (⌘) + V**, then press **Return (Enter)**.
+3. If it asks for your Mac login password, type it and press **Return**.
+   - *Security Note:* In Terminal, no letters, dots, or asterisks will appear while typing your password. This is normal macOS security behavior—just type your password normally and press Return.
+4. Press **Return** when it asks you to confirm installation.
+5. *(Apple Silicon M1/M2/M3/M4 Macs only)*: When Homebrew finishes, if it says **"Next steps"**, copy and paste this command and press Return to add Homebrew to your system path:
+   ```bash
+   echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile && eval "$(/opt/homebrew/bin/brew shellenv)"
+   ```
+
+### Step 3: Install FFmpeg
+Now that Homebrew is installed, installing FFmpeg is a single command:
+1. In the same Terminal window, copy and paste:
+   ```bash
+   brew install ffmpeg
+   ```
+2. Press **Return (Enter)**. Homebrew will automatically download and set up FFmpeg for you.
+
+### Step 4: Verify It Works
+1. In your menu bar, click the **OpenTangerine icon** (⬢) and select **Theme & Appearance Settings…** (or press `⌘,`).
+2. Scroll to the **Video & Audio Engines** card: you will see **`FFMPEG READY ✓`** displayed in green!
+3. All video and audio conversions (including **Shift + Drag** and **Option + Shift + Drag** cross-conversion) are now 100% unlocked.
+
+---
 
 ## 🛠 Build from source
 
@@ -119,11 +200,13 @@ swift run -c release
 OpenTangerine/
 ├── Package.swift                     # SwiftPM manifest (macOS 13+, executable target)
 ├── Sources/OpenTangerine/
-│   ├── OpenTangerine.swift           # App: drag monitor, radial wheel, conversion engine, editors
-│   ├── BackgroundRemoval.swift       # Vision AI & Magic Wand flood fill background removal engine
-│   └── VideoConversion.swift         # Multi-format video transcoding engine (FFmpeg & AVFoundation)
+│   ├── OpenTangerine.swift           # App: drag monitor, radial wheel, conversion engine, UI
+│   ├── AudioConversion.swift         # Multi-format music transcoder, VLC metadata tags & album art
+│   ├── VideoConversion.swift         # Multi-format video transcoding engine & technical inspector
+│   ├── FileIconEditor.swift          # Custom file/folder icon studio with interactive cropper
+│   └── BackgroundRemoval.swift       # Vision AI & Magic Wand flood fill background removal engine
 ├── Assets/AppIcon.png                # 1024×1024 source icon (converted to .icns at package time)
-└── scripts/package_app.sh            # Builds & bundles OpenTangerine.app
+└── scripts/package_app.sh            # Builds & bundles OpenTangerine.app (universal arm64 + x86_64)
 ```
 
 ## 📄 License
