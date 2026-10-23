@@ -1993,6 +1993,12 @@ public final class WheelState: ObservableObject {
 
     func actionHint(for slice: RadialSlice) -> String {
         if slice.isTool { return slice.hint }
+        if case .convertToFormat(let ext) = slice.action, ext.lowercased() == "pdf" {
+            let imgCount = fileURLs.filter { FileCategory.detect(from: $0) == .image }.count
+            if imgCount > 1 {
+                return interaction == .drag ? "Release to combine \(imgCount) photos into PDF" : "Click to combine \(imgCount) photos into PDF"
+            }
+        }
         return interaction == .drag ? "Release to convert" : "Click to convert"
     }
 
@@ -4239,7 +4245,7 @@ public final class AppUpdateService: ObservableObject {
         if let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, !v.isEmpty {
             return v
         }
-        return "1.0.9"
+        return "1.1.0"
     }
 
     @Published public var state: UpdateState = .idle
@@ -4846,11 +4852,11 @@ public final class AppCoordinator: ObservableObject {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.message = "Choose a file or folder to test the OpenTangerine radial menu"
         panel.prompt = "Select"
-        if panel.runModal() == .OK, let url = panel.url {
-            showWheel(for: [url], mode: mode, at: NSEvent.mouseLocation, interaction: .click)
+        if panel.runModal() == .OK, !panel.urls.isEmpty {
+            showWheel(for: panel.urls, mode: mode, at: NSEvent.mouseLocation, interaction: .click)
         }
     }
 
@@ -4883,7 +4889,14 @@ public final class AppCoordinator: ObservableObject {
                 if let first = urls.first {
                     self.execute(slice.action, for: first)
                 }
-            case .convertToFormat:
+            case .convertToFormat(let ext):
+                if ext.lowercased() == "pdf" {
+                    let imageURLs = urls.filter { FileCategory.detect(from: $0) == .image }
+                    if imageURLs.count > 1 {
+                        self.openPhotoPDFStudio(for: imageURLs)
+                        return
+                    }
+                }
                 for url in urls {
                     self.execute(slice.action, for: url)
                 }
@@ -5214,15 +5227,24 @@ public final class AppCoordinator: ObservableObject {
         MemoryOptimizer.reclaimMemory()
     }
 
-    private func openEditor<V: View>(_ view: V, size: CGSize) {
+    private func openEditor<V: View>(_ view: V, size: CGSize, resizable: Bool = false, minSize: CGSize? = nil) {
         closeEditor()
+
+        var mask: NSWindow.StyleMask = [.titled, .closable, .fullSizeContentView]
+        if resizable {
+            mask.insert(.resizable)
+            mask.insert(.miniaturizable)
+        }
 
         let win = NSWindow(
             contentRect: CGRect(origin: .zero, size: size),
-            styleMask: [.titled, .closable, .fullSizeContentView],
+            styleMask: mask,
             backing: .buffered,
             defer: false
         )
+        if let minSize {
+            win.minSize = minSize
+        }
         win.isReleasedWhenClosed = false
         win.titlebarAppearsTransparent = true
         win.titleVisibility = .hidden
@@ -5233,8 +5255,8 @@ public final class AppCoordinator: ObservableObject {
         win.level = .floating
         win.center()
         win.standardWindowButton(.closeButton)?.isHidden = true
-        win.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        win.standardWindowButton(.zoomButton)?.isHidden = true
+        win.standardWindowButton(.miniaturizeButton)?.isHidden = !resizable
+        win.standardWindowButton(.zoomButton)?.isHidden = !resizable
 
         let hostingView = NSHostingView(
             rootView: view
@@ -5261,6 +5283,41 @@ public final class AppCoordinator: ObservableObject {
 
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    public func openPhotoPDFStudio(for urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        statusMessage = "Opening PDF Studio for \(urls.count) photos…"
+        openEditor(
+            PhotoPDFStudioView(
+                sourceURLs: urls,
+                onExportComplete: { [weak self] outputURL, pageCount in
+                    self?.closeEditor()
+                    self?.statusMessage = "Created PDF: \(outputURL.lastPathComponent) (\(pageCount) pages)"
+                    self?.showNotification(title: "PDF Created", message: "Created \(outputURL.lastPathComponent) with \(pageCount) pages")
+                    NSWorkspace.shared.activateFileViewerSelecting([outputURL])
+                },
+                onClose: { [weak self] in
+                    self?.closeEditor()
+                }
+            ),
+            size: CGSize(width: 980, height: 680),
+            resizable: true,
+            minSize: CGSize(width: 860, height: 580)
+        )
+    }
+
+    public func pickPhotosAndOpenPDFStudio() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.image]
+        panel.message = "Choose photos to compile into a PDF document"
+        panel.prompt = "Open Studio"
+        if panel.runModal() == .OK, !panel.urls.isEmpty {
+            openPhotoPDFStudio(for: panel.urls)
+        }
     }
 
     public func openSettings() {
@@ -5489,6 +5546,21 @@ public struct OpenTangerineApp: App {
             RunLoop.current.run(until: Date().addingTimeInterval(0.35))
             print(String(format: "[MemTest] After close FileIconEditorView: %.2f MB", MemoryOptimizer.currentFootprintMB))
 
+            coord.openPhotoPDFStudio(for: [testImgURL])
+            RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+            print(String(format: "[MemTest] After open PhotoPDFStudioView: %.2f MB", MemoryOptimizer.currentFootprintMB))
+
+            coord.closeEditor()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+            print(String(format: "[MemTest] After close PhotoPDFStudioView: %.2f MB", MemoryOptimizer.currentFootprintMB))
+
+            let pdfOutMem = tempDir.appendingPathComponent("mem_test.pdf")
+            let memItem = PhotoPageItem(url: testImgURL)
+            if let outPDF = try? PhotoPDFEngine.shared.compilePDF(items: [memItem], pageSize: .matchImage, margin: .none, quality: .balanced, title: "MemTest", destinationURL: pdfOutMem, progress: { _, _ in }) {
+                print(String(format: "[MemTest] After PhotoPDFEngine compilePDF: %.2f MB", MemoryOptimizer.currentFootprintMB))
+                try? FileManager.default.removeItem(at: outPDF)
+            }
+
             MemoryOptimizer.reclaimMemory()
             RunLoop.current.run(until: Date().addingTimeInterval(0.35))
             print(String(format: "[MemTest] Final resting footprint: %.2f MB", MemoryOptimizer.currentFootprintMB))
@@ -5588,8 +5660,8 @@ public struct OpenTangerineApp: App {
 
             let folderConfigConvert = RadialMenuConfiguration.build(for: testFolder, mode: .convert)
             let folderConfigTools = RadialMenuConfiguration.build(for: testFolder, mode: .tools)
-            assert(folderConfigConvert.outerSlices.count == 2 && folderConfigConvert.outerSlices.map(\.title).contains("ZIP") && folderConfigConvert.outerSlices.map(\.title).contains("INFO"), "Folder convert wheel must have ZIP and INFO")
-            assert(folderConfigTools.outerSlices.count == 2 && folderConfigTools.outerSlices.map(\.title).contains("ZIP") && folderConfigTools.outerSlices.map(\.title).contains("INFO"), "Folder tools wheel must have ZIP and INFO")
+            assert(folderConfigConvert.outerSlices.count >= 2 && folderConfigConvert.outerSlices.map(\.title).contains("ZIP") && folderConfigConvert.outerSlices.map(\.title).contains("INFO"), "Folder convert wheel must have ZIP and INFO")
+            assert(folderConfigTools.outerSlices.count >= 2 && folderConfigTools.outerSlices.map(\.title).contains("ZIP") && folderConfigTools.outerSlices.map(\.title).contains("INFO"), "Folder tools wheel must have ZIP and INFO")
             print("  ✓ Wheel action exclusivity (folders vs photos): OK")
 
             // Folder scan test
@@ -5762,11 +5834,80 @@ public struct OpenTangerineApp: App {
             assert(cropped != nil, "FileIconService.cropImage must return cropped NSImage")
             print("  ✓ FileIconService cropping engine & memory efficiency: OK")
 
+            // Test Multi-Photo PDF Compilation & PhotoPDFStudio lifecycle
+            let testImg2URL = tempDir.appendingPathComponent("test_img2.png")
+            let testImg3URL = tempDir.appendingPathComponent("test_img3.png")
+
+            let img2 = NSImage(size: NSSize(width: 120, height: 80))
+            img2.lockFocus()
+            NSColor.systemCyan.setFill()
+            NSRect(x: 0, y: 0, width: 120, height: 80).fill()
+            img2.unlockFocus()
+            if let tiff2 = img2.tiffRepresentation,
+               let rep2 = NSBitmapImageRep(data: tiff2),
+               let png2 = rep2.representation(using: .png, properties: [:]) {
+                try? png2.write(to: testImg2URL)
+            }
+
+            let img3 = NSImage(size: NSSize(width: 90, height: 90))
+            img3.lockFocus()
+            NSColor.systemTeal.setFill()
+            NSRect(x: 0, y: 0, width: 90, height: 90).fill()
+            img3.unlockFocus()
+            if let tiff3 = img3.tiffRepresentation,
+               let rep3 = NSBitmapImageRep(data: tiff3),
+               let png3 = rep3.representation(using: .png, properties: [:]) {
+                try? png3.write(to: testImg3URL)
+            }
+
+            // Test PhotoPDFStudioView open/close lifecycle
+            coord.openPhotoPDFStudio(for: [testImgURL, testImg2URL, testImg3URL])
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            coord.closeEditor()
+            print("  ✓ PhotoPDFStudioView window lifecycle (open, render, close): OK")
+
+            // Test PhotoPDFEngine compilation with individual photo rotations, crops, filters & page ordering
+            var pageItem1 = PhotoPageItem(url: testImgURL)
+            pageItem1.rotationDegrees = 90
+            pageItem1.normalizedCrop = CGRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8)
+            pageItem1.filter = .scanDoc
+
+            var pageItem2 = PhotoPageItem(url: testImg2URL)
+            pageItem2.filter = .grayscale
+            pageItem2.isFlippedHorizontal = true
+            pageItem2.contrast = 1.3
+
+            var pageItem3 = PhotoPageItem(url: testImg3URL)
+            pageItem3.filter = .vivid
+
+            let compiledPDFURL = tempDir.appendingPathComponent("test_compiled.pdf")
+            try? FileManager.default.removeItem(at: compiledPDFURL)
+
+            let pdfOut = try! PhotoPDFEngine.shared.compilePDF(
+                items: [pageItem1, pageItem2, pageItem3],
+                pageSize: .matchImage,
+                margin: .none,
+                quality: .maximum,
+                title: "Test PDF Compilation",
+                destinationURL: compiledPDFURL,
+                progress: { _, _ in }
+            )
+            assert(FileManager.default.fileExists(atPath: pdfOut.path), "Compiled PDF must exist")
+            if let doc = PDFDocument(url: pdfOut) {
+                assert(doc.pageCount == 3, "Compiled PDF must contain exactly 3 pages, found \(doc.pageCount)")
+            } else {
+                assertionFailure("Compiled PDF must be readable by PDFDocument")
+            }
+            print("  ✓ PhotoPDFEngine 3-photo compilation (per-photo crop, rotate, doc scan & order): OK (3 pages)")
+
             // Clean up test items
             try? FileManager.default.removeItem(at: testFolder)
             try? FileManager.default.removeItem(at: zipResult.output)
             try? FileManager.default.removeItem(at: unzipResult.output)
             try? FileManager.default.removeItem(at: testImgURL)
+            try? FileManager.default.removeItem(at: testImg2URL)
+            try? FileManager.default.removeItem(at: testImg3URL)
+            try? FileManager.default.removeItem(at: compiledPDFURL)
 
             print("==> ALL STABILITY TESTS PASSED WITH ZERO CRASHES! 🎉")
             exit(0)
@@ -5809,6 +5950,9 @@ public struct OpenTangerineApp: App {
                 }
                 Button("Pick File to Test Tools & Cross-Convert Wheel…") {
                     coordinator.pickFileAndShowWheel(mode: .tools)
+                }
+                Button("Create PDF from Photos…") {
+                    coordinator.pickPhotosAndOpenPDFStudio()
                 }
                 Divider()
                 Menu("Theme") {

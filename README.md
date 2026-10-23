@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Ayanatiach/OpenTangerine/releases/latest"><img src="https://img.shields.io/badge/release-v1.0.9-FF6B35?style=flat-square&logo=apple" alt="Latest Release"></a>
+  <a href="https://github.com/Ayanatiach/OpenTangerine/releases/latest"><img src="https://img.shields.io/badge/release-v1.1.0-FF6B35?style=flat-square&logo=apple" alt="Latest Release"></a>
   <img src="https://img.shields.io/badge/platform-macOS%2013%2B-blue?style=flat-square" alt="Platform macOS 13+">
   <img src="https://img.shields.io/badge/arch-Universal%20(arm64%20%2B%20x86__64)-darkblue?style=flat-square" alt="Universal Binary">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License MIT"></a>
@@ -26,10 +26,35 @@ original file and revealed in Finder.
 | Gesture | Target | Wheel | What you get |
 |---|---|---|---|
 | **⇧ Shift + Drag** | Files | Convert | **Audio** → AAC / AIFF / ALAC / AMR / FLAC / M4A / MP3 / OGG / WAV / WMA · **Videos** → MP4 / MOV / WEBM / MKV / AVI / WMV / FLV / 3GP / OGV · **PDF** → DOCX / JPG / PNG / TXT · **Images** → PNG / WEBP / HEIC / JPG / AVIF / BMP / PDF / DOCX / TIFF |
+| **⇧ Shift + Drag** | Multiple Pictures | PDF Conversion | **Multi-Photo PDF Studio**: Pop-up studio to reorder pages, individually crop, rotate, flip, enhance with Doc Scan / B&W filters, and export to a single custom PDF |
 | **⇧ Shift + Drag** | Folders & ZIPs | Folder Actions | **Zip Folder** · **Unzip Archive** · **Folder/Archive Info** · **Custom Folder Icon** |
 | **⌥⇧ Option + Shift + Drag** | Video, Images, Audio, Folders | Tools & Cross-Convert | **Audio ↔ Video Cross-Conversion**: Convert Audio to **MP4 / MOV / WEBM / MKV / AVI / WMV / FLV / 3GP / OGV** · Extract Audio from Video to **MP3 / M4A / AAC / WAV / FLAC / OGG / AIFF / ALAC / WMA** · **Custom Icon Editor** (Crop/edit picture, Squircle guide, Finder icon sync) · **Audio**: **Tags & Name** (VLC title sync) · **Cover Picture & Finder Icon** · **Images**: **Custom Icon** · **Remove BG** · **Crop** · **Add BG** · **Metadata** · **Compress** · **Videos**: **Custom Icon & Poster** · **Info Specs** |
 
 Everything runs **100% offline** using Apple frameworks (Vision, PDFKit, ImageIO, CoreGraphics, AVFoundation, AudioToolbox, SwiftUI) with optional FFmpeg integration for expanded video & audio codecs.
+
+### 📄 Multi-Photo to PDF Studio (Interactive Page Ordering & Per-Photo Editing)
+
+When multiple pictures are selected in Finder (or chosen via **"Create PDF from Photos…"** in the menu bar) and you select the **PDF** slice on the radial menu:
+- **Interactive Multi-Photo Studio Window**: A dedicated, liquid-glass window pops up displaying all selected photos.
+- **Page Ordering & Management**:
+  - Live thumbnail strip on the left sidebar showing actual photos with edits applied.
+  - Reorder pages with **Move Up (▲)** and **Move Down (▼)** buttons.
+  - Reverse overall page sequence with one click (ideal for reverse-scanned pages).
+  - Add more photos from disk or remove unwanted photos.
+  - Sort pages by name or size.
+- **Individual Photo Editing**:
+  - **Rotation & Flips**: Rotate 90° clockwise/counter-clockwise, flip horizontal, flip vertical.
+  - **Interactive Multi-Side Crop**: Toggle crop mode to adjust an 8-handle crop box with rule-of-thirds grid, center pan drag, and aspect ratio presets (**Free**, **Original**, **1:1 Square**, **4:3**, **16:9**, **3:2**, **A4 Portrait**, **A4 Landscape**, **US Letter**).
+  - **Filters & Document Scan Enhancements**:
+    - **Doc Scan**: High-contrast binarization and paper whitening that turns rough mobile phone photos into crisp, legible scanned documents.
+    - **B & W (Grayscale)**, **Sepia**, **Vivid**, **Warm**, **Cool**, and **Negative**.
+    - **"Apply to All Pages"** shortcut to batch-enhance all pages at once.
+  - **Manual Adjustments**: Fine-tune Brightness, Contrast, and Saturation with live sliders.
+- **PDF Layout & Export Customization**:
+  - **Page Sizes**: **Fit to Photo** (borderless native image aspect), **A4 Paper**, **US Letter**, or **Square (8×8 in)**.
+  - **Margins**: Borderless, Small (0.25"), or Normal (0.5").
+  - **Quality & Compression**: Maximum Quality (lossless/0.95), Balanced (0.80), or Compact File (0.55).
+  - **Save & Reveal**: Save via native macOS file dialog with live rendering progress, auto-revealing the compiled PDF in Finder.
 
 ### 🔀 Audio ↔ Video Cross-Conversion (Shift + Option + Drag)
 
@@ -123,7 +148,7 @@ Keep OpenTangerine up to date directly from the app:
 ## 📦 Install
 
 ### Option A: Direct Download (Recommended)
-1. Download **[OpenTangerine-1.0.9-macOS.zip](https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.9/OpenTangerine-1.0.9-macOS.zip)** from the [Releases](https://github.com/Ayanatiach/OpenTangerine/releases) page.
+1. Download **[OpenTangerine-1.1.0-macOS.zip](https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.1.0/OpenTangerine-1.1.0-macOS.zip)** from the [Releases](https://github.com/Ayanatiach/OpenTangerine/releases) page.
 2. Unzip and drag **OpenTangerine.app** into your `/Applications` folder.
 3. Because the app is ad-hoc signed, on first launch **right-click → Open**, then click **Open**.
    *(Or run: `xattr -dr com.apple.quarantine /Applications/OpenTangerine.app` in Terminal)*
@@ -131,7 +156,7 @@ Keep OpenTangerine up to date directly from the app:
 
 ### Option B: One-Line Terminal Install
 ```bash
-curl -fsSL https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.9/OpenTangerine-1.0.9-macOS.zip -o /tmp/OpenTangerine.zip && \
+curl -fsSL https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.1.0/OpenTangerine-1.1.0-macOS.zip -o /tmp/OpenTangerine.zip && \
 unzip -q -o /tmp/OpenTangerine.zip -d /Applications && \
 xattr -dr com.apple.quarantine /Applications/OpenTangerine.app && \
 open -a /Applications/OpenTangerine.app

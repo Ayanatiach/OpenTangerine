@@ -2,6 +2,21 @@
 
 All notable changes to OpenTangerine will be documented in this file.
 
+## [1.1.0] - 2026-10-23
+
+### 🚀 Highlights
+- **Multi-Photo to PDF Studio (Interactive Page Ordering & Per-Photo Editing)**:
+  - When multiple pictures are dragged or selected and the **PDF** slice is chosen, a dedicated studio window pops up to preview, organize, and compile them into a unified PDF.
+  - **Live Page Ordering**: Move pages up/down, reverse overall order (perfect for reverse-scanned pages), sort by name or size, and append additional photos from disk.
+  - **Per-Photo Interactive Crop**: Crop mode with 8-handle resizer, rule-of-thirds grid, center pan drag, and aspect ratio presets (Free, Original, 1:1, 4:3, 16:9, 3:2, A4 Portrait, A4 Landscape, US Letter).
+  - **Rotation & Flips**: Individual 90° clockwise/counter-clockwise rotations and horizontal/vertical flips.
+  - **Document Scan & Color Filters**: High-contrast **Doc Scan** filter for paper/receipt whitening and ink sharpening, plus B&W, Sepia, Vivid, Warm, Cool, and Negative filters with "Apply to All Pages" batch enhancement.
+  - **Adjustments**: Manual Brightness, Contrast, and Saturation sliders with real-time preview.
+  - **PDF Page & Layout Options**: Choose between Fit to Photo, A4, US Letter, and Square; configure margins (None, Small, Normal); and select compression quality (Maximum, Balanced, Compact).
+  - **Menu Bar Integration**: Quick access via **"Create PDF from Photos…"** in the OpenTangerine menu bar.
+
+---
+
 ## [1.0.9] - 2026-10-23
 
 ### 🚀 Highlights

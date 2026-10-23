@@ -11,7 +11,7 @@ set -euo pipefail
 
 APP_NAME="OpenTangerine"
 BUNDLE_ID="com.ayanatiach.OpenTangerine"
-VERSION="1.0.9"
+VERSION="1.1.0"
 BUILD_NUMBER="1"
 MIN_MACOS="13.0"
 
