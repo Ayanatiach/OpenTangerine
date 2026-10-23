@@ -8,6 +8,13 @@
   Open-source macOS radial file converter &amp; image toolkit — triggered by <b>Shift + Drag</b> in Finder.
 </p>
 
+<p align="center">
+  <a href="https://github.com/Ayanatiach/OpenTangerine/releases/latest"><img src="https://img.shields.io/badge/release-v1.0.9-FF6B35?style=flat-square&logo=apple" alt="Latest Release"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%2013%2B-blue?style=flat-square" alt="Platform macOS 13+">
+  <img src="https://img.shields.io/badge/arch-Universal%20(arm64%20%2B%20x86__64)-darkblue?style=flat-square" alt="Universal Binary">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License MIT"></a>
+</p>
+
 ---
 
 ## ✨ Features
@@ -32,7 +39,7 @@ Hold **Option + Shift (⌥⇧) + Drag** on any audio or video file to trigger th
 - **Tools Wheel Integration**: Seamlessly retains access to **TAGS** (audio metadata editor), **ICON** (custom file icon editor with cropping), and **INFO** (specs inspector) in the same radial menu.
 - **Resource & Memory Optimization**: Background asynchronous execution with immediate autorelease pools and Mach VM heap purges ensuring zero UI freezing and minimal memory footprints.
 
-### 🖼️ Custom File & Folder Icon Studio with Interactive Cropper (v1.0.7)
+### 🖼️ Custom File & Folder Icon Studio with Interactive Cropper
 
 Drop or select any picture to personalize icons for **Videos**, **Images**, **Folders**, and **Audio**:
 - **Inline Crop / Edit Option**: When an image is dropped or selected, click the **"Edit / Crop"** option right beside **"Choose Picture…"** to crop or adjust it interactively before setting it.
@@ -116,7 +123,7 @@ Keep OpenTangerine up to date directly from the app:
 ## 📦 Install
 
 ### Option A: Direct Download (Recommended)
-1. Download **[OpenTangerine-1.0.8-macOS.zip](https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.8/OpenTangerine-1.0.8-macOS.zip)** from the [Releases](https://github.com/Ayanatiach/OpenTangerine/releases) page.
+1. Download **[OpenTangerine-1.0.9-macOS.zip](https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.9/OpenTangerine-1.0.9-macOS.zip)** from the [Releases](https://github.com/Ayanatiach/OpenTangerine/releases) page.
 2. Unzip and drag **OpenTangerine.app** into your `/Applications` folder.
 3. Because the app is ad-hoc signed, on first launch **right-click → Open**, then click **Open**.
    *(Or run: `xattr -dr com.apple.quarantine /Applications/OpenTangerine.app` in Terminal)*
@@ -124,7 +131,7 @@ Keep OpenTangerine up to date directly from the app:
 
 ### Option B: One-Line Terminal Install
 ```bash
-curl -fsSL https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.8/OpenTangerine-1.0.8-macOS.zip -o /tmp/OpenTangerine.zip && \
+curl -fsSL https://github.com/Ayanatiach/OpenTangerine/releases/download/v1.0.9/OpenTangerine-1.0.9-macOS.zip -o /tmp/OpenTangerine.zip && \
 unzip -q -o /tmp/OpenTangerine.zip -d /Applications && \
 xattr -dr com.apple.quarantine /Applications/OpenTangerine.app && \
 open -a /Applications/OpenTangerine.app

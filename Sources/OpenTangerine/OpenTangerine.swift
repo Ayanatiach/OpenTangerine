@@ -4239,7 +4239,7 @@ public final class AppUpdateService: ObservableObject {
         if let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, !v.isEmpty {
             return v
         }
-        return "1.0.8"
+        return "1.0.9"
     }
 
     @Published public var state: UpdateState = .idle

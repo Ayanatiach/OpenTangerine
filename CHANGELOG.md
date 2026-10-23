@@ -2,6 +2,41 @@
 
 All notable changes to OpenTangerine will be documented in this file.
 
+## [1.0.9] - 2026-10-23
+
+### 🚀 Highlights
+- **Universal Release Build & Repository Synchronization**:
+  - Re-compiled and validated the full universal binary (`arm64` Apple Silicon M1-M4 and `x86_64` Intel) with ad-hoc runtime code signatures.
+  - Bundled standalone `libopencore-amrnb.dylib` dynamically for native AMR encoding.
+  - Integrated in-app update service fallback to v1.0.9.
+  - Enhanced `README.md` with release status badges, verified curl installation commands, and feature tables.
+
+---
+
+## [1.0.8] - 2026-10-21
+
+### 🚀 Highlights
+- **Audio ↔ Video Cross-Conversion Engine (Option + Shift + Drag)**:
+  - Hold **Option + Shift (⌥⇧) + Drag** on any audio or video file to trigger the cross-conversion radial wheel.
+  - **Audio to Video Transcoding**: Transcode audio tracks into video files (**MP4**, **MOV**, **WEBM**, **MKV**, **AVI**, **WMV**, **FLV**, **3GP**, **OGV**), rendering embedded album art or Finder custom icon onto a 1280×720 visual card (2fps still-image looping with `-shortest` and AVFoundation fallback).
+  - **Video to Audio Extraction**: Extract pure, uncompressed/high-bitrate audio streams directly into **MP3**, **M4A**, **AAC**, **WAV**, **FLAC**, **OGG**, **AIFF**, **ALAC**, or **WMA** via FFmpeg `-vn` or Apple `afconvert`.
+  - Background asynchronous task pipeline with macOS system notification dispatch and Finder reveal.
+- **Custom File & Folder Icon Studio with Interactive Cropper**:
+  - Added dedicated **ICON** slice in the tools radial wheel.
+  - **Inline Crop / Edit Button**: Interactively adjust and crop source images prior to assigning them as Finder icons.
+  - **macOS Continuous Squircle Guide**: Interactive 8-handle box resizer, center drag panning, aspect ratio presets (1:1 Square, Free, 4:3, 16:9, 3:2), and Apple Squircle contour overlay.
+  - Universal support across Folders (with child file propagation), Videos (poster artwork), Images, and Audio.
+  - 1-click **Reset to Default System Icon** button.
+- **Multi-Format Music Transcoder & VLC-Compatible Metadata**:
+  - Convert between 10 core audio formats: **AAC**, **AIFF**, **ALAC**, **AMR**, **FLAC**, **M4A**, **MP3**, **OGG**, **WAV**, and **WMV/WMA**.
+  - **VLC-Compatible Metadata Name & Tag Editor**: Edit Track Title (synced across VLC Media Player, Apple Music, and external media players), Artist, Album, Album Artist, Year, Genre, and Track Number.
+  - Custom album artwork embedding (ID3v2 APIC, MP4/ALAC covr, FLAC picture blocks).
+- **Beginner's Guide to Homebrew & FFmpeg**:
+  - Detailed step-by-step instructions for non-technical users to install Homebrew and FFmpeg in under 2 minutes.
+- **Zero-Leak Memory Optimization & Universal Architecture**:
+  - Built for both Apple Silicon (M1/M2/M3/M4) and Intel x86_64 architectures.
+  - Active heap sweeps (`malloc_zone_pressure_relief`) keep live resting RAM footprint around ~80 MB.
+
 ---
 
 ## [1.0.6] - 2026-10-20
